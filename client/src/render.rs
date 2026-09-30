@@ -94,9 +94,11 @@ impl Renderer {
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .ok_or_else(|| anyhow!("surface not supported by adapter"))?;
         let caps = surface.get_capabilities(&adapter);
-        // Prefer a non-sRGB swapchain: the decoded values are already gamma-encoded.
-        if let Some(f) = caps.formats.iter().find(|f| !f.is_srgb()) {
-            config.format = *f;
+        // Prefer a plain 8-bit non-sRGB swapchain: the decoded values are already gamma-encoded.
+        // Float formats (Rgba16Float, offered first on Wayland/RADV) may be composited as linear.
+        let preferred = [wgpu::TextureFormat::Bgra8Unorm, wgpu::TextureFormat::Rgba8Unorm];
+        if let Some(f) = preferred.into_iter().find(|f| caps.formats.contains(f)) {
+            config.format = f;
         }
         let srgb_out = config.format.is_srgb();
         config.present_mode = if vsync {
