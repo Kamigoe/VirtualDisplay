@@ -1,13 +1,14 @@
 import Foundation
 import Network
 
-/// Serves the Annex-B stream over TCP to a single viewer (a new connection replaces the old one).
-/// Phase 1 transport: plain enough for `ffplay`/`mpv` to consume directly.
-final class StreamServer {
+/// Debug transport: serves the raw Annex-B stream over TCP to a single viewer (a new connection
+/// replaces the old one), plain enough for `ffplay`/`mpv` to consume directly.
+final class RawStreamServer {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "vdsend.net", qos: .userInteractive)
     private let stats: Stats
     private let onNeedKeyframe: () -> Void
+    private let onViewerChange: (Bool) -> Void
 
     // Only touched on `queue`.
     private var client: NWConnection?
@@ -17,9 +18,10 @@ final class StreamServer {
     /// Frames allowed to sit in the socket send path before we start dropping.
     private static let maxInflight = 3
 
-    init(port: UInt16, stats: Stats, onNeedKeyframe: @escaping () -> Void) throws {
+    init(port: UInt16, stats: Stats, onViewerChange: @escaping (Bool) -> Void, onNeedKeyframe: @escaping () -> Void) throws {
         self.stats = stats
         self.onNeedKeyframe = onNeedKeyframe
+        self.onViewerChange = onViewerChange
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
         let params = NWParameters(tls: nil, tcp: tcp)
@@ -28,7 +30,7 @@ final class StreamServer {
         listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
         listener.stateUpdateHandler = { state in
             switch state {
-            case .ready: log("listening on tcp port \(port)")
+            case .ready: log("raw stream listening on tcp port \(port)")
             case .failed(let e):
                 log("listener failed: \(e)")
                 exit(1)
@@ -51,7 +53,8 @@ final class StreamServer {
             guard let self, let c else { return }
             switch state {
             case .ready:
-                log("viewer connected: \(c.endpoint)")
+                log("raw viewer connected: \(c.endpoint)")
+                self.onViewerChange(true)
                 self.onNeedKeyframe()
             case .failed(let e):
                 log("viewer \(c.endpoint) failed: \(e)")
@@ -78,7 +81,9 @@ final class StreamServer {
     }
 
     private func drop(_ c: NWConnection) {
-        if client === c { client = nil }
+        guard client === c else { return }
+        client = nil
+        onViewerChange(false)
     }
 
     /// Thread-safe. Drops frames (and asks for a keyframe) if the viewer falls behind.

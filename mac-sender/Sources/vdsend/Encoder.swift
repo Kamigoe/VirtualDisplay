@@ -4,7 +4,8 @@ import VideoToolbox
 
 /// Hardware HEVC encoder producing Annex-B access units (parameter sets prepended to keyframes).
 final class Encoder {
-    typealias OutputHandler = (_ annexB: Data, _ keyframe: Bool) -> Void
+    /// `captureTime` is the mach time the source frame was composited (re-encodes use the re-encode time).
+    typealias OutputHandler = (_ annexB: Data, _ keyframe: Bool, _ captureTime: UInt64) -> Void
 
     private let options: Options
     private let stats: Stats
@@ -16,6 +17,10 @@ final class Encoder {
 
     // All of the following are only touched on `queue`.
     private var lastInput: CVPixelBuffer?
+    /// Latest captured frame while paused (not yet converted/encoded).
+    private var pendingRaw: CVPixelBuffer?
+    /// Paused while nobody is watching: frames are tracked but not encoded (saves power on a fanless Mac).
+    private var paused = true
     private var keyframeRequested = true
     private var refineWork: DispatchWorkItem?
 
@@ -87,6 +92,11 @@ final class Encoder {
     func submit(_ pb: CVPixelBuffer, displayTime: UInt64) {
         queue.async {
             self.refineWork?.cancel()
+            if self.paused {
+                self.pendingRaw = pb
+                self.lastInput = nil
+                return
+            }
             guard let input = self.convert(pb) else { return }
             self.lastInput = input
             self.encode(input, displayTime: displayTime)
@@ -98,9 +108,32 @@ final class Encoder {
     func requestKeyframe() {
         queue.async {
             self.keyframeRequested = true
-            if let last = self.lastInput {
-                self.encode(last, displayTime: mach_absolute_time())
+            if !self.paused { self.encodeLatestNow() }
+        }
+    }
+
+    /// Resuming always starts with an IDR of the latest frame, so a static screen still reaches the viewer.
+    func setPaused(_ p: Bool) {
+        queue.async {
+            guard p != self.paused else { return }
+            self.paused = p
+            log("encoder \(p ? "paused (no viewers)" : "resumed")")
+            if p {
+                self.refineWork?.cancel()
+            } else {
+                self.keyframeRequested = true
+                self.encodeLatestNow()
             }
+        }
+    }
+
+    private func encodeLatestNow() {
+        if self.lastInput == nil, let raw = self.pendingRaw {
+            self.lastInput = self.convert(raw)
+            self.pendingRaw = nil
+        }
+        if let last = self.lastInput {
+            self.encode(last, displayTime: mach_absolute_time())
         }
     }
 
@@ -148,7 +181,7 @@ final class Encoder {
             let data = Self.annexB(sb, includeParameterSets: key)
             self.stats.frameEncoded(bytes: data.count, encodeMs: machToMs(t1 - t0),
                                     pipelineMs: machToMs(t1 &- min(displayTime, t1)))
-            self.onOutput(data, key)
+            self.onOutput(data, key, displayTime)
         }
         if st != noErr { log("VTCompressionSessionEncodeFrame failed \(st)") }
     }
