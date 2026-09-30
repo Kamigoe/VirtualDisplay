@@ -13,6 +13,7 @@ final class Streamer {
     private var capture: Capture?
     private var encoder: Encoder?
     private var viewers = Set<String>()
+    private var recovering = false
 
     init(options: Options, stats: Stats, onFrame: @escaping Encoder.OutputHandler) {
         self.options = options
@@ -20,7 +21,7 @@ final class Streamer {
         self.onFrame = onFrame
     }
 
-    /// Brings display + pipeline to `o`. The display is only recreated if its mode changed.
+    /// Brings display + pipeline to `o`. The display is created once and re-moded in place.
     func apply(_ o: Options) async throws {
         let displayChanged = display == nil
             || o.width != options.width || o.height != options.height
@@ -36,14 +37,10 @@ final class Streamer {
         capture = nil
         encoder = nil
 
-        if displayChanged {
-            // Create the new display before dropping the old one so macOS always has a screen
-            // (with the lid closed the virtual display may be the only one).
+        if let display {
+            if displayChanged { try await display.setMode(o) }
+        } else {
             let d = try await VirtualDisplay.create(options: o)
-            guard await d.waitForMode(o) else {
-                throw NSError(domain: "vdsend", code: 6, userInfo: [NSLocalizedDescriptionKey:
-                    "virtual display did not reach \(o.pixelWidth)x\(o.pixelHeight)"])
-            }
             d.configureArrangement(makeMain: o.makeMain, mirrorBuiltin: o.mirrorBuiltin)
             display = d
         }
@@ -54,14 +51,41 @@ final class Streamer {
         let enc = try Encoder(options: o, stats: stats, onOutput: onFrame)
         enc.setPaused(viewers.isEmpty)
         let stats = self.stats
-        let cap = Capture { pb, displayTime in
+        let cap = Capture(onFrame: { pb, displayTime in
             stats.frameCaptured()
             enc.submit(pb, displayTime: displayTime)
-        }
+        }, onStopped: { [weak self] _ in
+            Task { @MainActor in await self?.recover() }
+        })
         try await cap.start(displayID: display!.displayID, options: o)
         encoder = enc
         capture = cap
         options = o
+    }
+
+    /// ScreenCaptureKit stops when the display goes away or is reconfigured underneath it (display
+    /// sleep/wake, Spaces changes). Rebuild the pipeline instead of exiting: with the lid closed this
+    /// process is the only way back to the machine.
+    private func recover() async {
+        guard !recovering else { return }
+        recovering = true
+        defer { recovering = false }
+        capture = nil
+        encoder = nil
+        var delay: UInt64 = 1
+        while capture == nil {
+            try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+            VirtualDisplay.declareUserActivity()
+            do {
+                try await display?.setMode(options)
+                try await apply(options)
+                log("capture recovered")
+                if !viewers.isEmpty { encoder?.requestKeyframe() }
+            } catch {
+                log("capture recovery failed: \(error.localizedDescription); retrying in \(min(delay * 2, 10))s")
+                delay = min(delay * 2, 10)
+            }
+        }
     }
 
     func requestKeyframe() {

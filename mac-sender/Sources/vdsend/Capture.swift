@@ -9,9 +9,11 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let queue = DispatchQueue(label: "vdsend.capture", qos: .userInteractive)
     private var stream: SCStream?
     private let onFrame: FrameHandler
+    private let onStopped: (Error) -> Void
 
-    init(onFrame: @escaping FrameHandler) {
+    init(onFrame: @escaping FrameHandler, onStopped: @escaping (Error) -> Void) {
         self.onFrame = onFrame
+        self.onStopped = onStopped
     }
 
     func start(displayID: CGDirectDisplayID, options o: Options) async throws {
@@ -71,6 +73,6 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         log("capture stopped with error: \(error.localizedDescription)")
-        exit(1)
+        onStopped(error)
     }
 }

@@ -73,9 +73,9 @@ final class Encoder {
             var t: VTPixelTransferSession?
             VTPixelTransferSessionCreate(allocator: nil, pixelTransferSessionOut: &t)
             guard let t else { throw NSError(domain: "vdsend", code: 5, userInfo: [NSLocalizedDescriptionKey: "VTPixelTransferSessionCreate failed"]) }
+            // Matrix only: also setting destination primaries/transfer makes the session convert the
+            // sRGB-tagged capture to the BT.709 curve, which shifts tones (measured 55 dB -> 24 dB PSNR).
             VTSessionSetProperty(t, key: kVTPixelTransferPropertyKey_DestinationYCbCrMatrix, value: kCVImageBufferYCbCrMatrix_ITU_R_709_2)
-            VTSessionSetProperty(t, key: kVTPixelTransferPropertyKey_DestinationColorPrimaries, value: kCVImageBufferColorPrimaries_ITU_R_709_2)
-            VTSessionSetProperty(t, key: kVTPixelTransferPropertyKey_DestinationTransferFunction, value: kCVImageBufferTransferFunction_ITU_R_709_2)
             transfer = t
             let attrs: [CFString: Any] = [
                 kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange,
