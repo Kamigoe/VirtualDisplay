@@ -1,0 +1,13 @@
+# Swift
+mac-sender/.build/
+mac-sender/.swiftpm/
+*.xcodeproj/
+xcuserdata/
+
+# Rust
+client/target/
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/
