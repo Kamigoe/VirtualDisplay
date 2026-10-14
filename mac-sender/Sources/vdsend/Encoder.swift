@@ -22,9 +22,16 @@ final class Encoder {
     /// Paused while nobody is watching: frames are tracked but not encoded (saves power on a fanless Mac).
     private var paused = true
     private var keyframeRequested = true
+    private var framesSinceKeyframe = 0
     private var refineWork: DispatchWorkItem?
 
     private static let refinePasses = 2
+    /// VideoToolbox's HEVC uses an 11-bit POC LSB. Explicit slice RPSs keep only the previous
+    /// picture, but at the POC wrap (2047 -> 0) the encoder falls back to SPS RPS #0, which lists
+    /// the four previous pictures as references although two of them were already dropped
+    /// (verified on macOS 26.5 / M1). Decoders choke there (FFmpeg 8 skips until the next IDR,
+    /// FFmpeg 6 + Mesa VA-API segfaults), so never let a GOP reach the wrap.
+    private static let maxFramesPerGOP = 1800
     private static let refineDelay: TimeInterval = 0.15
 
     init(options o: Options, stats: Stats, onOutput: @escaping OutputHandler) throws {
@@ -165,10 +172,15 @@ final class Encoder {
         let t0 = mach_absolute_time()
         let pts = CMClockMakeHostTimeFromSystemUnits(t0)
         var frameProps: CFDictionary?
+        if framesSinceKeyframe >= Self.maxFramesPerGOP {
+            keyframeRequested = true
+        }
         if keyframeRequested {
             frameProps = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary
             keyframeRequested = false
+            framesSinceKeyframe = 0
         }
+        framesSinceKeyframe += 1
         let st = VTCompressionSessionEncodeFrame(session, imageBuffer: pb, presentationTimeStamp: pts, duration: .invalid,
                                                  frameProperties: frameProps, infoFlagsOut: nil) { [weak self] status, flags, sb in
             guard let self else { return }

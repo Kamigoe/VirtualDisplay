@@ -109,6 +109,8 @@ final class Streamer {
         try await cap.start(displayID: display!.displayID, options: o)
         encoder = enc
         capture = cap
+        // The last viewer may have left while we were awaiting (actor reentrancy).
+        if viewers.isEmpty { await stopPipeline() }
     }
 
     private func stopPipeline() async {
