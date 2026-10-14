@@ -3,10 +3,10 @@ import Foundation
 let options = Options.parse(Array(CommandLine.arguments.dropFirst()))
 let stats = Stats()
 
-// Keep the system (and the virtual display) awake and out of App Nap while running.
+// Keep the machine reachable for viewers. Display sleep is only blocked while someone watches (Streamer).
 let activity = ProcessInfo.processInfo.beginActivity(
-    options: [.userInitiated, .latencyCritical, .idleDisplaySleepDisabled],
-    reason: "Streaming virtual display")
+    options: [.idleSystemSleepDisabled],
+    reason: "Waiting for VirtualDisplay viewers")
 
 var video: VideoSender!
 var rawServer: RawStreamServer?
@@ -25,7 +25,16 @@ do {
     if options.rawPort != 0 {
         rawServer = try RawStreamServer(
             port: options.rawPort, stats: stats,
-            onViewerChange: { active in Task { @MainActor in streamer.setViewer("raw", active: active) } },
+            onViewerChange: { active in
+                Task { @MainActor in
+                    if active {
+                        streamer.addViewer("raw")
+                        do { try await streamer.apply(streamer.options) } catch { log("error: \(error.localizedDescription)") }
+                    } else {
+                        await streamer.removeViewer("raw")
+                    }
+                }
+            },
             onNeedKeyframe: { _ = requestKeyframe() })
     }
 } catch {
@@ -36,7 +45,7 @@ do {
 // The display comes up immediately (so a lid-closed Mac has a screen) even before any viewer connects.
 Task { @MainActor in
     do {
-        try await streamer.apply(options)
+        try await streamer.start()
         control = try ControlServer(port: options.port, streamer: streamer, video: video)
     } catch {
         log("error: \(error.localizedDescription)")

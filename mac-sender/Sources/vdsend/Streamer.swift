@@ -1,8 +1,9 @@
 import CoreGraphics
 import Foundation
 
-/// Owns the virtual display and the capture → encode pipeline, and rebuilds them when the mode changes.
-/// All methods run on the main actor.
+/// Owns the virtual display and the capture → encode pipeline. The display lives for the whole
+/// process; capture and encoding run only while a viewer is attached, so an idle sender costs
+/// nothing and lets the displays sleep. All methods run on the main actor.
 @MainActor
 final class Streamer {
     private(set) var options: Options
@@ -14,6 +15,8 @@ final class Streamer {
     private var encoder: Encoder?
     private var viewers = Set<String>()
     private var recovering = false
+    /// Held while someone is watching: keeps the displays awake and the process out of App Nap.
+    private var watchActivity: NSObjectProtocol?
 
     init(options: Options, stats: Stats, onFrame: @escaping Encoder.OutputHandler) {
         self.options = options
@@ -21,46 +24,98 @@ final class Streamer {
         self.onFrame = onFrame
     }
 
-    /// Brings display + pipeline to `o`. The display is created once and re-moded in place.
-    func apply(_ o: Options) async throws {
-        let displayChanged = display == nil
-            || o.width != options.width || o.height != options.height
-            || o.hiDPI != options.hiDPI || o.refresh != options.refresh
-        let pipelineChanged = displayChanged || capture == nil
-            || o.chroma != options.chroma || o.bitrateMbps != options.bitrateMbps
-        guard pipelineChanged else { return }
+    /// Creates the virtual display in the initial mode (so a lid-closed Mac has a screen right away).
+    func start() async throws {
+        VirtualDisplay.declareUserActivity()
+        let d = try await VirtualDisplay.create(options: options)
+        d.configureArrangement(makeMain: options.makeMain, mirrorBuiltin: options.mirrorBuiltin)
+        display = d
+    }
 
+    /// Brings the display to `o` (re-moded in place) and, while anyone watches, (re)builds the pipeline.
+    func apply(_ o: Options) async throws {
+        guard let display else {
+            throw NSError(domain: "vdsend", code: 8, userInfo: [NSLocalizedDescriptionKey: "virtual display not created"])
+        }
+        let displayChanged = o.width != options.width || o.height != options.height
+            || o.hiDPI != options.hiDPI || o.refresh != options.refresh
+        let pipelineChanged = displayChanged || o.chroma != options.chroma || o.bitrateMbps != options.bitrateMbps
+        if displayChanged {
+            await stopPipeline()
+            VirtualDisplay.declareUserActivity()
+            try await display.setMode(o)
+        }
+        options = o
+        if viewers.isEmpty {
+            await stopPipeline()
+        } else if capture == nil || pipelineChanged {
+            try await startPipeline()
+        }
+    }
+
+    func requestKeyframe() {
+        encoder?.requestKeyframe()
+    }
+
+    /// Call before `apply` when a viewer attaches.
+    func addViewer(_ id: String) {
+        viewers.insert(id)
+        if watchActivity == nil {
+            watchActivity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .latencyCritical, .idleDisplaySleepDisabled],
+                reason: "Streaming virtual display")
+        }
+    }
+
+    func removeViewer(_ id: String) async {
+        viewers.remove(id)
+        guard viewers.isEmpty else { return }
+        await stopPipeline()
+        if let a = watchActivity {
+            ProcessInfo.processInfo.endActivity(a)
+            watchActivity = nil
+        }
+        log("no viewers: capture stopped, displays may sleep")
+    }
+
+    func stop() async {
+        await stopPipeline()
+        display = nil
+    }
+
+    // MARK: - pipeline
+
+    private func startPipeline() async throws {
+        await stopPipeline()
         // WindowServer stops compositing (and ScreenCaptureKit delivers nothing) while displays sleep.
         VirtualDisplay.declareUserActivity()
-
-        await capture?.stop()
-        capture = nil
-        encoder = nil
-
-        if let display {
-            if displayChanged { try await display.setMode(o) }
-        } else {
-            let d = try await VirtualDisplay.create(options: o)
-            d.configureArrangement(makeMain: o.makeMain, mirrorBuiltin: o.mirrorBuiltin)
-            display = d
-        }
+        let o = options
         if o.pixelRate > 650_000_000 {
             log(String(format: "warning: %.0f Mpx/s exceeds what the M1 encoder sustains (~650 Mpx/s); expect queueing latency", o.pixelRate / 1e6))
         }
-
         let enc = try Encoder(options: o, stats: stats, onOutput: onFrame)
-        enc.setPaused(viewers.isEmpty)
+        enc.setPaused(false)
         let stats = self.stats
         let cap = Capture(onFrame: { pb, displayTime in
             stats.frameCaptured()
             enc.submit(pb, displayTime: displayTime)
-        }, onStopped: { [weak self] _ in
-            Task { @MainActor in await self?.recover() }
+        }, onStopped: { [weak self] stopped, _ in
+            Task { @MainActor in
+                // Ignore late errors from a capture we already replaced.
+                guard let self, self.capture === stopped else { return }
+                await self.recover()
+            }
         })
         try await cap.start(displayID: display!.displayID, options: o)
         encoder = enc
         capture = cap
-        options = o
+    }
+
+    private func stopPipeline() async {
+        let cap = capture
+        capture = nil
+        encoder = nil
+        await cap?.stop()
     }
 
     /// ScreenCaptureKit stops when the display goes away or is reconfigured underneath it (display
@@ -73,40 +128,18 @@ final class Streamer {
         capture = nil
         encoder = nil
         var delay: UInt64 = 1
-        while capture == nil {
+        while capture == nil && !viewers.isEmpty {
             try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+            guard !viewers.isEmpty else { break }
             VirtualDisplay.declareUserActivity()
             do {
                 try await display?.setMode(options)
-                try await apply(options)
+                try await startPipeline()
                 log("capture recovered")
-                if !viewers.isEmpty { encoder?.requestKeyframe() }
             } catch {
                 log("capture recovery failed: \(error.localizedDescription); retrying in \(min(delay * 2, 10))s")
                 delay = min(delay * 2, 10)
             }
         }
-    }
-
-    func requestKeyframe() {
-        encoder?.requestKeyframe()
-    }
-
-    /// Encoding runs only while at least one viewer (UDP session or raw TCP) is attached.
-    func setViewer(_ id: String, active: Bool) {
-        if active {
-            viewers.insert(id)
-            VirtualDisplay.declareUserActivity() // the display may have slept while nobody was watching
-        } else {
-            viewers.remove(id)
-        }
-        encoder?.setPaused(viewers.isEmpty)
-    }
-
-    func stop() async {
-        await capture?.stop()
-        capture = nil
-        encoder = nil
-        display = nil
     }
 }

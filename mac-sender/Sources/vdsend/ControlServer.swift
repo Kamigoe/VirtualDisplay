@@ -65,7 +65,7 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
         guard client === c else { return }
         client = nil
         video.endSession()
-        Task { @MainActor in self.streamer.setViewer(Self.viewerID, active: false) }
+        Task { @MainActor in await self.streamer.removeViewer(Self.viewerID) }
         log("viewer disconnected: \(c.endpoint)")
     }
 
@@ -142,13 +142,14 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
                 o.chroma = chroma == 1 ? 444 : 420
                 if bitrateKbps > 0 { o.bitrateMbps = Double(bitrateKbps) / 1000 }
             }
+            self.streamer.addViewer(Self.viewerID)
             do {
                 try await self.streamer.apply(o)
             } catch {
+                await self.streamer.removeViewer(Self.viewerID)
                 self.queue.async { self.fail(c, "failed to configure: \(error.localizedDescription)") }
                 return
             }
-            self.streamer.setViewer(Self.viewerID, active: true)
             let applied = self.streamer.options
             self.queue.async {
                 guard self.client === c else { return }
