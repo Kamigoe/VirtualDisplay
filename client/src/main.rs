@@ -301,7 +301,30 @@ impl App {
         thread::Builder::new()
             .name("decode".into())
             .spawn(move || {
+                // Last line of defence for the reference chain: never hand the decoder a picture
+                // whose predecessor it has not seen. Mesa's VA-API driver segfaults on missing
+                // references (seen on RX 9070 XT / Mesa 25.2.8), so after any gap or decode
+                // error everything is dropped until the next keyframe.
+                let mut expected: Option<u32> = None;
+                let mut last_request = Instant::now() - Duration::from_secs(1);
                 for frame in rx {
+                    let in_sequence = frame.keyframe || expected == Some(frame.frame_id);
+                    if !in_sequence {
+                        if expected.is_some() {
+                            eprintln!(
+                                "decoder: expected frame {} but got {}; dropping until a keyframe",
+                                expected.unwrap(),
+                                frame.frame_id
+                            );
+                            expected = None;
+                        }
+                        if last_request.elapsed() >= Duration::from_millis(250) {
+                            dcontrol.request_keyframe();
+                            last_request = Instant::now();
+                        }
+                        continue;
+                    }
+                    expected = Some(frame.frame_id.wrapping_add(1));
                     let t0 = Instant::now();
                     match decoder.decode(&frame.data) {
                         Ok(Some(pic)) => {
@@ -314,8 +337,10 @@ impl App {
                         }
                         Ok(None) => {}
                         Err(e) => {
-                            eprintln!("{e:#}");
+                            eprintln!("{e:#}; dropping until a keyframe");
+                            expected = None;
                             dcontrol.request_keyframe();
+                            last_request = Instant::now();
                         }
                     }
                 }

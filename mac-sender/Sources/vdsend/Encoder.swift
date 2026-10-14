@@ -170,11 +170,12 @@ final class Encoder {
             keyframeRequested = false
         }
         let st = VTCompressionSessionEncodeFrame(session, imageBuffer: pb, presentationTimeStamp: pts, duration: .invalid,
-                                                 frameProperties: frameProps, infoFlagsOut: nil) { [weak self] status, _, sb in
+                                                 frameProperties: frameProps, infoFlagsOut: nil) { [weak self] status, flags, sb in
             guard let self else { return }
             let t1 = mach_absolute_time()
             guard status == noErr, let sb, CMSampleBufferDataIsReady(sb) else {
                 if status != noErr { log("encode error \(status)") }
+                if flags.contains(.frameDropped) { log("encoder dropped a frame") }
                 return
             }
             let key = Self.isKeyframe(sb)

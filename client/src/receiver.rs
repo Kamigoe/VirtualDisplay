@@ -20,6 +20,8 @@ use crate::stats::Stats;
 pub struct EncodedFrame {
     pub data: Vec<u8>,
     pub capture_us: u64,
+    pub frame_id: u32,
+    pub keyframe: bool,
 }
 
 struct Assembly {
@@ -238,11 +240,13 @@ impl Receiver {
                     match self.out.try_send(EncodedFrame {
                         data: a.data,
                         capture_us: a.capture_us,
+                        frame_id: id,
+                        keyframe: a.keyframe,
                     }) {
                         Ok(()) => {}
                         Err(TrySendError::Full(_)) => {
                             // Decoder is behind; the reference chain is broken from here on.
-                            self.lose_sync(Instant::now());
+                            self.lose_sync(Instant::now(), "decoder queue full");
                             return;
                         }
                         Err(TrySendError::Disconnected(_)) => return,
@@ -281,7 +285,12 @@ impl Receiver {
                     return;
                 }
                 if a.nack_rounds >= MAX_NACK_ROUNDS {
-                    self.lose_sync(now);
+                    let reason = format!(
+                        "frame {id}: {} of {} packets still missing after {MAX_NACK_ROUNDS} nacks",
+                        a.have.len() - a.received,
+                        a.have.len()
+                    );
+                    self.lose_sync(now, &reason);
                     return;
                 }
                 a.nack_rounds += 1;
@@ -298,14 +307,15 @@ impl Receiver {
                 // Every packet of this frame was lost, so we cannot even Nack it.
                 let since = *self.stall_since.get_or_insert(now);
                 if now - since >= retry_after {
-                    self.lose_sync(now);
+                    self.lose_sync(now, &format!("frame {id}: no packets arrived"));
                 }
             }
             _ => {}
         }
     }
 
-    fn lose_sync(&mut self, now: Instant) {
+    fn lose_sync(&mut self, now: Instant, reason: &str) {
+        eprintln!("resync: {reason}; waiting for a keyframe");
         self.stats.frame_lost();
         self.waiting_for_keyframe = true;
         self.stall_since = None;
