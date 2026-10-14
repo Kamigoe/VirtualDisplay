@@ -46,7 +46,9 @@ usage: vdview <mac-host>[:port] [options]
 
 self-test (no sender or display needed):
   vdview --snapshot IN.hevc OUT.ppm [--hwaccel NAME]
-      decode the first picture of an Annex-B file and write what the renderer draws";
+      decode the first picture of an Annex-B file and write what the renderer draws
+  vdview --decode-test IN.hevc [--hwaccel NAME]
+      decode a whole Annex-B stream picture by picture, as the live path does";
 
 /// The M1's HEVC encoder sustains roughly this many pixels per second.
 const ENCODER_PIXEL_RATE: f64 = 650e6;
@@ -485,8 +487,92 @@ fn snapshot(input: &str, output: &str, hwaccel: &str) -> Result<()> {
     Ok(())
 }
 
+/// Splits an Annex-B HEVC stream into access units (one coded picture each): a new unit starts
+/// at a VPS or at the first slice segment of a picture.
+fn split_access_units(data: &[u8]) -> Vec<&[u8]> {
+    let mut starts = vec![];
+    let mut i = 0;
+    while i + 3 < data.len() {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            let sc = if i > 0 && data[i - 1] == 0 { i - 1 } else { i };
+            starts.push((sc, i + 3));
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    let mut aus = vec![];
+    let mut au_start: Option<usize> = None;
+    for &(sc, nal) in &starts {
+        let Some(&b0) = data.get(nal) else { break };
+        let kind = (b0 >> 1) & 0x3f;
+        let first_slice = kind < 32 && data.get(nal + 2).is_some_and(|b| b & 0x80 != 0);
+        if kind == 32 || first_slice {
+            // A VPS directly followed by its picture's slice belongs to the same unit.
+            if let Some(st) = au_start {
+                let has_slice = starts
+                    .iter()
+                    .filter(|(s2, n2)| *s2 >= st && *s2 < sc && data.get(*n2).is_some_and(|b| (b >> 1) & 0x3f < 32))
+                    .count()
+                    > 0;
+                if has_slice {
+                    aus.push(&data[st..sc]);
+                    au_start = Some(sc);
+                }
+            } else {
+                au_start = Some(sc);
+            }
+        }
+    }
+    if let Some(st) = au_start {
+        aus.push(&data[st..]);
+    }
+    aus
+}
+
+/// `--decode-test IN.hevc`: feed every access unit through the live decode path.
+fn decode_test(input: &str, hwaccel: &str) -> Result<()> {
+    let data = std::fs::read(input).with_context(|| format!("reading {input}"))?;
+    let aus = split_access_units(&data);
+    let mut decoder = Decoder::open(hwaccel, 0)?;
+    let t0 = Instant::now();
+    let (mut pictures, mut errors) = (0usize, 0usize);
+    for (i, au) in aus.iter().enumerate() {
+        match decoder.decode(au) {
+            Ok(Some(_)) => pictures += 1,
+            Ok(None) => {}
+            Err(e) => {
+                errors += 1;
+                eprintln!("access unit {i}: {e:#}");
+            }
+        }
+    }
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "{} access units, {pictures} pictures, {errors} errors via {} ({:.2} ms/picture)",
+        aus.len(),
+        decoder.describe(),
+        ms / aus.len().max(1) as f64
+    );
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("--decode-test") {
+        let Some(input) = argv.get(2) else {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        };
+        let hwaccel = argv.iter().position(|a| a == "--hwaccel").and_then(|i| argv.get(i + 1)).map_or("auto", String::as_str);
+        return match decode_test(input, hwaccel) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("vdview: {e:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if argv.get(1).map(String::as_str) == Some("--snapshot") {
         let (Some(input), Some(output)) = (argv.get(2), argv.get(3)) else {
             eprintln!("{USAGE}");
