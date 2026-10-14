@@ -70,7 +70,8 @@ fn newer(a: u32, b: u32) -> bool {
 const TICK: Duration = Duration::from_millis(2);
 /// No new packet for this long on an incomplete frame => ask for the rest.
 const QUIET_BEFORE_NACK: Duration = Duration::from_millis(3);
-const MAX_NACK_ROUNDS: u32 = 2;
+/// Several quick rounds: on Wi-Fi a burst often eats the first retransmission (or the Nack) too.
+const MAX_NACK_ROUNDS: u32 = 4;
 const KEYFRAME_RETRY: Duration = Duration::from_millis(250);
 const KEEPALIVE_EVERY: Duration = Duration::from_secs(1);
 const PING_EVERY: Duration = Duration::from_millis(500);
@@ -157,9 +158,9 @@ impl Receiver {
             if last_ping.is_none_or(|t| now - t >= PING_EVERY) {
                 self.control.ping();
                 last_ping = Some(now);
-                if let Some(rtt) = self.control.clock.lock().unwrap().rtt_us() {
+                if let Some(rtt) = self.control.clock.lock().unwrap().min_rtt_us() {
                     self.retry_after =
-                        Duration::from_micros(2 * rtt + 2000).max(Duration::from_millis(8));
+                        Duration::from_micros(2 * rtt + 3000).max(Duration::from_millis(8));
                 }
             }
             match self.socket.recv(&mut buf) {

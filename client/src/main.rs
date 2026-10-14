@@ -284,8 +284,9 @@ impl App {
 
         let (renderer, uploader) = Renderer::new(window.clone(), self.args.vsync)?;
         let stats = Arc::new(Stats::default());
-        // A few frames of slack; if the decoder falls further behind, the receiver resyncs on a keyframe.
-        let (tx, rx) = sync_channel(8);
+        // When a stalled frame is finally repaired, every frame queued behind it is released at once;
+        // decoding them (~6 ms each) catches up faster than resyncing on a large keyframe over Wi-Fi.
+        let (tx, rx) = sync_channel(64);
         receiver::spawn(
             addr,
             start.session_id,

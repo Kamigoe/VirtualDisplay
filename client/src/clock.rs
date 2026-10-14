@@ -50,6 +50,12 @@ impl ClockSync {
         self.samples.back().map(|s| s.rtt_us)
     }
 
+    /// Best-case RTT over the window. Wi-Fi on the sender spikes to 30-100 ms now and then; timers
+    /// derived from the latest sample would then wait hundreds of ms before retrying.
+    pub fn min_rtt_us(&self) -> Option<u64> {
+        self.best().map(|s| s.rtt_us)
+    }
+
     /// Converts a sender timestamp to the viewer clock.
     pub fn server_to_client(&self, server_us: u64) -> Option<u64> {
         let s = self.best()?;
