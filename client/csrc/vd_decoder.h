@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 enum {
-    VD_LAYOUT_NV12 = 0, /* Y plane + interleaved CbCr at half resolution */
+    VD_LAYOUT_NV12 = 0, /* Y plane + interleaved CbCr at half resolution (NV12, or P010 for 10-bit) */
     VD_LAYOUT_I420 = 1, /* Y, Cb, Cr planes; chroma at half resolution */
     VD_LAYOUT_I444 = 2, /* Y, Cb, Cr planes; full resolution */
 };
@@ -18,6 +18,9 @@ typedef struct VdFrame {
     int height;
     int layout;
     int full_range;
+    int bit_depth;        /* 8 or 10 */
+    int bytes_per_sample; /* 1, or 2 for 10-bit */
+    int msb_aligned;      /* 10-bit value in the high bits of each 16-bit sample (P010) */
     const uint8_t *data[3];
     int linesize[3];
 } VdFrame;

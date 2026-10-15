@@ -135,12 +135,31 @@ int vd_decoder_decode(VdDecoder *d, const uint8_t *data, int size, VdFrame *out)
         snprintf(d->desc, sizeof d->desc, "software (%s)", av_get_pix_fmt_name(f->format));
     }
 
+    out->bit_depth = 8;
+    out->bytes_per_sample = 1;
+    out->msb_aligned = 0;
     switch (f->format) {
     case AV_PIX_FMT_NV12: out->layout = VD_LAYOUT_NV12; break;
+    case AV_PIX_FMT_P010LE:
+        out->layout = VD_LAYOUT_NV12;
+        out->bit_depth = 10;
+        out->bytes_per_sample = 2;
+        out->msb_aligned = 1;
+        break;
     case AV_PIX_FMT_YUV420P:
     case AV_PIX_FMT_YUVJ420P: out->layout = VD_LAYOUT_I420; break;
+    case AV_PIX_FMT_YUV420P10LE:
+        out->layout = VD_LAYOUT_I420;
+        out->bit_depth = 10;
+        out->bytes_per_sample = 2;
+        break;
     case AV_PIX_FMT_YUV444P:
     case AV_PIX_FMT_YUVJ444P: out->layout = VD_LAYOUT_I444; break;
+    case AV_PIX_FMT_YUV444P10LE:
+        out->layout = VD_LAYOUT_I444;
+        out->bit_depth = 10;
+        out->bytes_per_sample = 2;
+        break;
     default: return VD_ERR_UNSUPPORTED_FORMAT;
     }
     out->width = f->width;

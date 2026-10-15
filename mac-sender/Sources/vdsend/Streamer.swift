@@ -39,7 +39,8 @@ final class Streamer {
         }
         let displayChanged = o.width != options.width || o.height != options.height
             || o.hiDPI != options.hiDPI || o.refresh != options.refresh
-        let pipelineChanged = displayChanged || o.chroma != options.chroma || o.bitrateMbps != options.bitrateMbps
+        let pipelineChanged = displayChanged || o.chroma != options.chroma || o.bitDepth != options.bitDepth
+            || o.bitrateMbps != options.bitrateMbps
         if displayChanged {
             await stopPipeline()
             VirtualDisplay.declareUserActivity()

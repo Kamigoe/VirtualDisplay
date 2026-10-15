@@ -37,6 +37,7 @@ usage: vdview <mac-host>[:port] [options]
   --hidpi / --no-hidpi  2x backing store on the Mac (default: on when the monitor scale is >= 175%)
   --server-mode         keep whatever mode the Mac is already using
   --chroma 420|444      chroma subsampling (default 420; 444 is decoded on the CPU on AMD GPUs)
+  --bit-depth 8|10      sample bit depth (default: sender's); 10 reduces banding in gradients
   --bitrate MBPS        average bitrate (default: sender's)
   --hwaccel NAME        auto | none | d3d11va | vaapi | vulkan | videotoolbox (default auto)
   --threads N           software decoding threads (default 0 = auto)
@@ -59,6 +60,7 @@ struct Args {
     hidpi: Option<bool>,
     server_mode: bool,
     chroma444: bool,
+    bit_depth: u8,
     bitrate_kbps: u32,
     hwaccel: String,
     threads: i32,
@@ -76,6 +78,7 @@ impl Args {
             hidpi: None,
             server_mode: false,
             chroma444: false,
+            bit_depth: 0,
             bitrate_kbps: 0,
             hwaccel: "auto".into(),
             threads: 0,
@@ -103,6 +106,13 @@ impl Args {
                         "420" => false,
                         "444" => true,
                         other => bail!("--chroma must be 420 or 444, not {other}"),
+                    }
+                }
+                "--bit-depth" => {
+                    a.bit_depth = match value()?.as_str() {
+                        "8" => 8,
+                        "10" => 10,
+                        other => bail!("--bit-depth must be 8 or 10, not {other}"),
                     }
                 }
                 "--bitrate" => a.bitrate_kbps = (value()?.parse::<f64>()? * 1000.0) as u32,
@@ -157,6 +167,7 @@ impl Args {
             refresh_mhz: 60_000,
             chroma444: self.chroma444,
             bitrate_kbps: self.bitrate_kbps,
+            bit_depth: self.bit_depth,
         };
         if self.server_mode {
             return h;
@@ -264,11 +275,12 @@ impl App {
             let _ = proxy.send_event(UserEvent::Closed(reason));
         })?;
         println!(
-            "stream: {}x{} @ {:.2} Hz, HEVC {}",
+            "stream: {}x{} @ {:.2} Hz, HEVC {} {}-bit",
             start.pixel_width,
             start.pixel_height,
             start.refresh_mhz as f64 / 1000.0,
-            if start.chroma444 { "4:4:4" } else { "4:2:0" }
+            if start.chroma444 { "4:4:4" } else { "4:2:0" },
+            start.bit_depth
         );
 
         let mut attrs = Window::default_attributes().with_title("vdview");

@@ -123,7 +123,9 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
             fail(c, "protocol version \(version) not supported (server speaks \(Proto.version))")
             return
         }
-        log("hello from \(c.endpoint): \(width)x\(height)\(hidpi != 0 ? " HiDPI" : "") @ \(Double(refreshMilli) / 1000) Hz, chroma \(chroma == 1 ? 444 : 420), \(bitrateKbps) kbps")
+        // Optional trailing fields (protocol v1 extensions); absent from older viewers.
+        let bitDepth: Int? = r.u8().flatMap { $0 == 8 || $0 == 10 ? Int($0) : nil } // 0 = sender's default
+        log("hello from \(c.endpoint): \(width)x\(height)\(hidpi != 0 ? " HiDPI" : "") @ \(Double(refreshMilli) / 1000) Hz, chroma \(chroma == 1 ? 444 : 420), \(bitDepth.map { "\($0)-bit" } ?? "default depth"), \(bitrateKbps) kbps")
 
         Task { @MainActor in
             var o = self.streamer.options
@@ -140,6 +142,7 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
                     o.refresh = Double(refreshMilli) / 1000
                 }
                 o.chroma = chroma == 1 ? 444 : 420
+                if let bitDepth { o.bitDepth = bitDepth }
                 if bitrateKbps > 0 { o.bitrateMbps = Double(bitrateKbps) / 1000 }
             }
             self.streamer.addViewer(Self.viewerID)
@@ -163,8 +166,9 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
                 w.u32(UInt32((applied.refresh * 1000).rounded()))
                 w.u8(Proto.codecHEVC)
                 w.u8(applied.chroma == 444 ? 1 : 0)
+                w.u8(UInt8(applied.bitDepth))
                 self.send(.start, w.data, to: c)
-                log("session \(String(format: "%08x", sid)) started: \(applied.pixelWidth)x\(applied.pixelHeight) @ \(applied.refresh) Hz")
+                log("session \(String(format: "%08x", sid)) started: \(applied.pixelWidth)x\(applied.pixelHeight) @ \(applied.refresh) Hz, \(applied.bitDepth)-bit")
             }
         }
     }

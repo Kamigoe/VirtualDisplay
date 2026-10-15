@@ -33,6 +33,8 @@ pub struct Hello {
     pub refresh_mhz: u32,
     pub chroma444: bool,
     pub bitrate_kbps: u32,
+    /// 8 or 10; 0 = sender's default. Optional trailing field (older senders ignore it).
+    pub bit_depth: u8,
 }
 
 impl Hello {
@@ -45,6 +47,7 @@ impl Hello {
         b.extend_from_slice(&self.refresh_mhz.to_be_bytes());
         b.push(self.chroma444 as u8);
         b.extend_from_slice(&self.bitrate_kbps.to_be_bytes());
+        b.push(self.bit_depth);
         b
     }
 }
@@ -57,6 +60,7 @@ pub struct Start {
     pub refresh_mhz: u32,
     pub codec: u8,
     pub chroma444: bool,
+    pub bit_depth: u8,
 }
 
 impl Start {
@@ -73,6 +77,8 @@ impl Start {
             refresh_mhz: r.u32()?,
             codec: r.u8()?,
             chroma444: r.u8()? == 1,
+            // Optional trailing field; senders predating it only do 8-bit.
+            bit_depth: r.u8().unwrap_or(8),
         })
     }
 }

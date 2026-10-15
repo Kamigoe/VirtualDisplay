@@ -7,9 +7,12 @@ struct Params {
     full_range: u32,
     // 1 when the swapchain format is *Srgb and expects linear output
     srgb_out: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
+    // sampled unorm value * code_scale = integer code (255, 65535, or 65535/64 for P010)
+    code_scale: f32,
+    // 8 or 10
+    bit_depth: u32,
+    // 1: add +-0.5 LSB noise so 10-bit gradients don't band on an 8-bit swapchain
+    dither: u32,
 };
 
 @group(0) @binding(0) var tex_y: texture_2d<f32>;
@@ -57,20 +60,30 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         cr = textureSample(tex_v, samp_chroma, in.uv).r;
     }
 
+    // Work in integer code values so 8- and 10-bit share one set of range constants.
+    let yc = y * params.code_scale;
+    let cbc = cb * params.code_scale;
+    let crc = cr * params.code_scale;
+    let k = f32(1u << (params.bit_depth - 8u)); // 1 for 8-bit, 4 for 10-bit
+    let max_code = 255.0 * k + (k - 1.0);       // 255 or 1023
     var luma: f32;
     var u: f32;
     var v: f32;
     if params.full_range == 1u {
-        luma = y;
-        u = cb - 0.5;
-        v = cr - 0.5;
+        luma = yc / max_code;
+        u = (cbc - 128.0 * k) / max_code;
+        v = (crc - 128.0 * k) / max_code;
     } else {
-        luma = (y - 16.0 / 255.0) * (255.0 / 219.0);
-        u = (cb - 128.0 / 255.0) * (255.0 / 224.0);
-        v = (cr - 128.0 / 255.0) * (255.0 / 224.0);
+        luma = (yc - 16.0 * k) / (219.0 * k);
+        u = (cbc - 128.0 * k) / (224.0 * k);
+        v = (crc - 128.0 * k) / (224.0 * k);
     }
 
     var rgb = vec3(luma + 1.5748 * v, luma - 0.1873 * u - 0.4681 * v, luma + 1.8556 * u);
+    if params.dither == 1u {
+        let n = fract(sin(dot(in.pos.xy, vec2(12.9898, 78.233))) * 43758.5453);
+        rgb += vec3((n - 0.5) / 255.0);
+    }
     rgb = clamp(rgb, vec3(0.0), vec3(1.0));
     if params.srgb_out == 1u {
         rgb = srgb_to_linear(rgb);

@@ -16,6 +16,9 @@ struct RawFrame {
     height: c_int,
     layout: c_int,
     full_range: c_int,
+    bit_depth: c_int,
+    bytes_per_sample: c_int,
+    msb_aligned: c_int,
     data: [*const u8; 3],
     linesize: [c_int; 3],
 }
@@ -59,6 +62,12 @@ pub struct Picture<'a> {
     pub height: u32,
     pub layout: Layout,
     pub full_range: bool,
+    /// 8 or 10.
+    pub bit_depth: u32,
+    /// Samples are 16-bit (10-bit content).
+    pub wide: bool,
+    /// 16-bit samples carry the value in their high bits (P010) rather than low bits.
+    pub msb_aligned: bool,
     pub planes: Vec<Plane<'a>>,
 }
 
@@ -87,6 +96,9 @@ impl Decoder {
             height: 0,
             layout: 0,
             full_range: 0,
+            bit_depth: 0,
+            bytes_per_sample: 0,
+            msb_aligned: 0,
             data: [ptr::null(); 3],
             linesize: [0; 3],
         };
@@ -105,16 +117,18 @@ impl Decoder {
         let (w, h) = (f.width as u32, f.height as u32);
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
         let (layout, dims): (Layout, &[(u32, u32, u32)]) = match f.layout {
-            // (width in texels, height, bytes per texel)
+            // (width in texels, height, samples per texel)
             0 => (Layout::Nv12, &[(w, h, 1), (cw, ch, 2)]),
             1 => (Layout::I420, &[(w, h, 1), (cw, ch, 1), (cw, ch, 1)]),
             2 => (Layout::I444, &[(w, h, 1), (w, h, 1), (w, h, 1)]),
             other => return Err(anyhow!("unknown layout {other}")),
         };
+        let sample_bytes = f.bytes_per_sample as u32;
         let planes = dims
             .iter()
             .enumerate()
-            .map(|(i, &(pw, ph, bpp))| {
+            .map(|(i, &(pw, ph, samples))| {
+                let bpp = samples * sample_bytes;
                 let stride = f.linesize[i] as u32;
                 assert!(stride >= pw * bpp, "unexpected plane stride");
                 // Last row only needs its visible bytes.
@@ -132,6 +146,9 @@ impl Decoder {
             height: h,
             layout,
             full_range: f.full_range != 0,
+            bit_depth: f.bit_depth as u32,
+            wide: sample_bytes == 2,
+            msb_aligned: f.msb_aligned != 0,
             planes,
         }))
     }

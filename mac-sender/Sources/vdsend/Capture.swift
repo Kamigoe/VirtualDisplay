@@ -38,20 +38,28 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(o.refresh.rounded()))
         cfg.queueDepth = 5
         cfg.colorSpaceName = CGColorSpace.sRGB
+        cfg.pixelFormat = Self.pixelFormat(o)
         if o.chroma == 420 {
             // WindowServer converts to 4:2:0 on the GPU; hand straight to the encoder.
-            cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
             cfg.colorMatrix = CGDisplayStream.yCbCrMatrix_ITU_R_709_2
-        } else {
-            // Full-resolution colour; converted to 4:4:4 YCbCr before encoding.
-            cfg.pixelFormat = kCVPixelFormatType_32BGRA
         }
 
         let s = SCStream(filter: SCContentFilter(display: display, excludingWindows: []), configuration: cfg, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await s.startCapture()
         stream = s
-        log("capture started: \(o.pixelWidth)x\(o.pixelHeight) @ \(o.refresh) Hz, \(o.chroma == 420 ? "420v" : "BGRA")")
+        log("capture started: \(o.pixelWidth)x\(o.pixelHeight) @ \(o.refresh) Hz, \(fourCC(cfg.pixelFormat))")
+    }
+
+    /// 4:2:0 comes straight from WindowServer as YCbCr ('420v' / 10-bit 'x420'); 4:4:4 is captured
+    /// as RGB ('BGRA' / 10-bit 'l10r') and converted by the encoder.
+    static func pixelFormat(_ o: Options) -> OSType {
+        switch (o.chroma, o.bitDepth) {
+        case (420, 10): kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+        case (420, _): kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        case (_, 10): kCVPixelFormatType_ARGB2101010LEPacked
+        default: kCVPixelFormatType_32BGRA
+        }
     }
 
     func stop() async {

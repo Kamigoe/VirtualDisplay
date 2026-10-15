@@ -13,6 +13,9 @@ struct VideoTextures {
     width: u32,
     height: u32,
     full_range: bool,
+    bit_depth: u32,
+    wide: bool,
+    msb_aligned: bool,
     textures: Vec<wgpu::Texture>,
     bind_group: wgpu::BindGroup,
 }
@@ -50,16 +53,22 @@ pub struct Renderer {
 }
 
 /// Mirrors `Params` in shader.wgsl (32 bytes).
-fn params_bytes(scale: [f32; 2], layout: Layout, full_range: bool, srgb_out: bool) -> [u8; 32] {
+fn params_bytes(scale: [f32; 2], v: &VideoTextures, srgb_out: bool, dither: bool) -> [u8; 32] {
+    // Multiplier from the sampled unorm value to the integer code value.
+    let code_scale: f32 = match (v.wide, v.msb_aligned) {
+        (false, _) => 255.0,
+        (true, false) => 65535.0,
+        (true, true) => 65535.0 / 64.0, // P010: 10 bits in the top of 16
+    };
     let words: [u32; 8] = [
         scale[0].to_bits(),
         scale[1].to_bits(),
-        (layout != Layout::Nv12) as u32,
-        full_range as u32,
+        (v.layout != Layout::Nv12) as u32,
+        v.full_range as u32,
         srgb_out as u32,
-        0,
-        0,
-        0,
+        code_scale.to_bits(),
+        v.bit_depth,
+        (dither && v.bit_depth > 8 && !srgb_out) as u32,
     ];
     let mut out = [0u8; 32];
     for (i, w) in words.iter().enumerate() {
@@ -86,6 +95,7 @@ impl Renderer {
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("vdview"),
+                required_features: adapter.features() & wgpu::Features::TEXTURE_FORMAT_16BIT_NORM,
                 ..Default::default()
             }))?;
 
@@ -157,6 +167,7 @@ impl Renderer {
             &self.pipeline,
             (self.config.width, self.config.height),
             self.srgb_out,
+            true, // 10-bit content onto an 8-bit swapchain
         );
         let fresh = match drawn {
             Some((serial, capture_us)) if serial != self.presented_serial => {
@@ -280,6 +291,7 @@ impl Common {
         pipeline: &wgpu::RenderPipeline,
         (tw, th): (u32, u32),
         srgb_out: bool,
+        dither: bool,
     ) -> Option<(u64, u64)> {
         let shared = self.shared.lock().unwrap();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -305,7 +317,7 @@ impl Common {
         self.queue.write_buffer(
             &self.params,
             0,
-            &params_bytes(scale, v.layout, v.full_range, srgb_out),
+            &params_bytes(scale, v, srgb_out, dither),
         );
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &v.bind_group, &[]);
@@ -319,11 +331,19 @@ impl Uploader {
     pub fn upload(&self, pic: &Picture, capture_us: u64) {
         let c = &self.0;
         let mut shared = c.shared.lock().unwrap();
+        if pic.wide && !c.device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM) {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| eprintln!("this GPU lacks 16-bit normalized textures; use --bit-depth 8"));
+            return;
+        }
         let stale = shared.video.as_ref().is_none_or(|v| {
             v.layout != pic.layout
                 || v.width != pic.width
                 || v.height != pic.height
                 || v.full_range != pic.full_range
+                || v.bit_depth != pic.bit_depth
+                || v.wide != pic.wide
+                || v.msb_aligned != pic.msb_aligned
         });
         if stale {
             shared.video = Some(self.create(pic));
@@ -361,10 +381,12 @@ impl Uploader {
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                let format = if pic.layout == Layout::Nv12 && i == 1 {
-                    wgpu::TextureFormat::Rg8Unorm
-                } else {
-                    wgpu::TextureFormat::R8Unorm
+                let interleaved = pic.layout == Layout::Nv12 && i == 1;
+                let format = match (interleaved, pic.wide) {
+                    (true, true) => wgpu::TextureFormat::Rg16Unorm,
+                    (true, false) => wgpu::TextureFormat::Rg8Unorm,
+                    (false, true) => wgpu::TextureFormat::R16Unorm,
+                    (false, false) => wgpu::TextureFormat::R8Unorm,
                 };
                 create_plane(&c.device, p.width, p.height, format)
             })
@@ -405,10 +427,11 @@ impl Uploader {
             ],
         });
         println!(
-            "video: {}x{} {:?}{}",
+            "video: {}x{} {:?} {}-bit{}",
             pic.width,
             pic.height,
             pic.layout,
+            pic.bit_depth,
             if pic.full_range { " full-range" } else { "" }
         );
         VideoTextures {
@@ -416,6 +439,9 @@ impl Uploader {
             width: pic.width,
             height: pic.height,
             full_range: pic.full_range,
+            bit_depth: pic.bit_depth,
+            wide: pic.wide,
+            msb_aligned: pic.msb_aligned,
             textures,
             bind_group,
         }
@@ -464,7 +490,10 @@ pub fn snapshot(pic: &Picture) -> Result<Vec<u8>> {
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default()))
         .context("no GPU adapter")?;
-    let (device, queue) = pollster::block_on(adapter.request_device(&Default::default()))?;
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: adapter.features() & wgpu::Features::TEXTURE_FORMAT_16BIT_NORM,
+        ..Default::default()
+    }))?;
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let (common, pipeline) = Common::build(device, queue, format);
     Uploader(common.clone()).upload(pic, 0);
@@ -499,6 +528,7 @@ pub fn snapshot(pic: &Picture) -> Result<Vec<u8>> {
         &pipeline,
         (w, h),
         false,
+        false, // keep snapshots deterministic
     );
     encoder.copy_texture_to_buffer(
         target.as_image_copy(),

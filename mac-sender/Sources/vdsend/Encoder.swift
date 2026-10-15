@@ -66,9 +66,10 @@ final class Encoder {
             (kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_ITU_R_709_2),
             (kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2),
         ]
-        // 4:4:4 input selects the Main 4:4:4 (RExt) profile automatically.
+        // 4:4:4 input selects the RExt (Main 4:4:4 / 4:4:4 10) profile automatically.
         if o.chroma == 420 {
-            props.append((kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main_AutoLevel))
+            props.append((kVTCompressionPropertyKey_ProfileLevel,
+                          o.bitDepth == 10 ? kVTProfileLevel_HEVC_Main10_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel))
         }
         for (k, v) in props {
             let r = VTSessionSetProperty(s, key: k, value: v)
@@ -85,14 +86,15 @@ final class Encoder {
             VTSessionSetProperty(t, key: kVTPixelTransferPropertyKey_DestinationYCbCrMatrix, value: kCVImageBufferYCbCrMatrix_ITU_R_709_2)
             transfer = t
             let attrs: [CFString: Any] = [
-                kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange,
+                kCVPixelBufferPixelFormatTypeKey: o.bitDepth == 10 ? kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange
+                                                                   : kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange,
                 kCVPixelBufferWidthKey: o.pixelWidth,
                 kCVPixelBufferHeightKey: o.pixelHeight,
                 kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
             ]
             CVPixelBufferPoolCreate(nil, nil, attrs as CFDictionary, &pool)
         }
-        log("encoder: HEVC \(o.chroma == 444 ? "4:4:4" : "4:2:0") \(o.pixelWidth)x\(o.pixelHeight) @ \(o.refresh) Hz, \(o.bitrateMbps) Mbps avg, speed-priority \(speed)")
+        log("encoder: HEVC \(o.chroma == 444 ? "4:4:4" : "4:2:0") \(o.bitDepth)-bit \(o.pixelWidth)x\(o.pixelHeight) @ \(o.refresh) Hz, \(o.bitrateMbps) Mbps avg, speed-priority \(speed)")
     }
 
     /// Called from the capture queue with a freshly composited frame.

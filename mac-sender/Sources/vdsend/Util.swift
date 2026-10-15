@@ -6,6 +6,10 @@ private let timebase: mach_timebase_info_data_t = {
     return tb
 }()
 
+func fourCC(_ f: OSType) -> String {
+    String(bytes: [24, 16, 8, 0].map { UInt8(truncatingIfNeeded: f >> $0) }, encoding: .ascii) ?? "\(f)"
+}
+
 func machToMs(_ t: UInt64) -> Double {
     Double(t) * Double(timebase.numer) / Double(timebase.denom) / 1e6
 }

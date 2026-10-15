@@ -7,6 +7,8 @@ struct Options: Equatable {
     var hiDPI = false
     var refresh = 60.0
     var chroma = 420
+    /// 8 or 10. 10-bit (HEVC Main10 / RExt) quantises gradients more finely even from 8-bit content.
+    var bitDepth = 8
     var bitrateMbps = 50.0
     var port: UInt16 = 7777
     /// Phase-1 style raw Annex-B TCP stream for ffplay/mpv debugging (0 = off).
@@ -32,6 +34,7 @@ struct Options: Equatable {
                            a connecting viewer may request another mode unless --lock-mode
       --hidpi              2x backing store (e.g. --mode 1920x1080@60 --hidpi encodes 3840x2160)
       --chroma 420|444     chroma subsampling (default 420; 444 needs a 4:4:4-capable decoder)
+      --bit-depth 8|10     sample bit depth (default 8; a viewer may request another)
       --bitrate MBPS       average bitrate in Mbit/s (default 50)
       --port N             control (TCP) and video (UDP) port (default 7777)
       --raw-port N         also serve a raw HEVC Annex-B stream over TCP for ffplay/mpv (default off)
@@ -67,6 +70,9 @@ struct Options: Equatable {
             case "--chroma":
                 guard let c = Int(value(a)), c == 420 || c == 444 else { fail("--chroma must be 420 or 444") }
                 o.chroma = c
+            case "--bit-depth":
+                guard let b = Int(value(a)), b == 8 || b == 10 else { fail("--bit-depth must be 8 or 10") }
+                o.bitDepth = b
             case "--bitrate":
                 guard let b = Double(value(a)), b > 0 else { fail("bad --bitrate") }
                 o.bitrateMbps = b
