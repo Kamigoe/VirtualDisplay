@@ -37,8 +37,9 @@ usage: vdview <mac-host>[:port] [options]
   --mode WxH@HZ         request this logical mode (default: match this PC's primary monitor)
   --hidpi / --no-hidpi  2x backing store on the Mac (default: on when the monitor scale is >= 175%)
   --server-mode         keep whatever mode the Mac is already using
-  --chroma 420|444      chroma subsampling (default 420; 444 is decoded on the CPU on AMD GPUs)
-  --bit-depth 8|10      sample bit depth (default 10; reduces banding in gradients)
+  --chroma 420|444      chroma subsampling (default 444: sharp small text/UI, 8-bit only, decoded
+                        on the CPU on AMD GPUs; 420 allows 10-bit for smoother gradients)
+  --bit-depth 8|10      sample bit depth for 4:2:0 (default 10; reduces banding in gradients)
   --refresh HZ|max      refresh rate when matching the monitor (default 60; max = highest the
                         monitor and the Mac encoder allow)
   --bitrate MBPS        average bitrate (default: sender's)
@@ -87,7 +88,7 @@ impl Args {
             refresh: Some(60_000),
             hidpi: None,
             server_mode: false,
-            chroma444: false,
+            chroma444: true,
             bit_depth: 10,
             bitrate_kbps: 0,
             hwaccel: "auto".into(),
