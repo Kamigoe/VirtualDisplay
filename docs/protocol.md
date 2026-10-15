@@ -41,6 +41,10 @@ vdview                                   vdsend
 | u32 | refresh_mhz | リフレッシュレート（mHz、例 60000） |
 | u8 | chroma | 希望クロマ：`0` = 4:2:0, `1` = 4:4:4 |
 | u32 | bitrate_kbps | 平均ビットレート。`0` なら送信側の既定値 |
+| u8 | bit_depth | （任意・末尾）`8` / `10`。`0` または省略で送信側の既定値。4:4:4 は常に 8 |
+
+Hello は接続中に何度送ってもよい。送信側はパイプラインを組み直し、新しい `session_id` の Start を返す
+（受信側は新しいセッションの最初のキーフレームから受け直す）。
 
 ### 0x02 Start (S→C)
 
@@ -53,6 +57,7 @@ vdview                                   vdsend
 | u32 | refresh_mhz | |
 | u8 | codec | `1` = HEVC (Annex-B) |
 | u8 | chroma | `0` = 4:2:0, `1` = 4:4:4 |
+| u8 | bit_depth | （任意・末尾）`8` / `10`。省略時は 8 |
 
 ### 0x03 KeyframeRequest (C→S)
 

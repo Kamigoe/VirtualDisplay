@@ -38,7 +38,9 @@ usage: vdview <mac-host>[:port] [options]
   --hidpi / --no-hidpi  2x backing store on the Mac (default: on when the monitor scale is >= 175%)
   --server-mode         keep whatever mode the Mac is already using
   --chroma 420|444      chroma subsampling (default 420; 444 is decoded on the CPU on AMD GPUs)
-  --bit-depth 8|10      sample bit depth (default: sender's); 10 reduces banding in gradients
+  --bit-depth 8|10      sample bit depth (default 10; reduces banding in gradients)
+  --refresh HZ|max      refresh rate when matching the monitor (default 60; max = highest the
+                        monitor and the Mac encoder allow)
   --bitrate MBPS        average bitrate (default: sender's)
   --hwaccel NAME        auto | none | d3d11va | vaapi | vulkan | videotoolbox (default auto)
   --threads N           software decoding threads (default 0 = auto)
@@ -62,6 +64,8 @@ const ENCODER_PIXEL_RATE: f64 = 650e6;
 struct Args {
     server: String,
     mode: Option<(u16, u16, u32)>,
+    /// Requested refresh in mHz; None = the highest the monitor and encoder allow.
+    refresh: Option<u32>,
     hidpi: Option<bool>,
     server_mode: bool,
     chroma444: bool,
@@ -80,10 +84,11 @@ impl Args {
         let mut a = Args {
             server: String::new(),
             mode: None,
+            refresh: Some(60_000),
             hidpi: None,
             server_mode: false,
             chroma444: false,
-            bit_depth: 0,
+            bit_depth: 10,
             bitrate_kbps: 0,
             hwaccel: "auto".into(),
             threads: 0,
@@ -102,6 +107,14 @@ impl Args {
                         .ok_or_else(|| anyhow!("bad --mode {v}"))?;
                     let hz: f64 = hz.parse()?;
                     a.mode = Some((w.parse()?, h.parse()?, (hz * 1000.0).round() as u32));
+                }
+                "--refresh" => {
+                    let v = value()?;
+                    a.refresh = if v == "max" {
+                        None
+                    } else {
+                        Some((v.parse::<f64>()? * 1000.0).round() as u32)
+                    };
                 }
                 "--hidpi" => a.hidpi = Some(true),
                 "--no-hidpi" => a.hidpi = Some(false),
@@ -164,7 +177,8 @@ impl Args {
     }
 
     /// Mode request: explicit `--mode`, else mirror the local monitor (clamped to the encoder's capacity).
-    fn hello(&self, monitor: Option<&MonitorHandle>) -> Hello {
+    /// Returns the request plus the highest refresh rate (mHz) F4 may switch to.
+    fn hello(&self, monitor: Option<&MonitorHandle>) -> (Hello, u32) {
         let mut h = Hello {
             width: 0,
             height: 0,
@@ -175,7 +189,7 @@ impl Args {
             bit_depth: self.bit_depth,
         };
         if self.server_mode {
-            return h;
+            return (h, h.refresh_mhz);
         }
         let (pw, ph, scale, mhz) = monitor
             .map(|m| {
@@ -190,24 +204,25 @@ impl Args {
         h.hidpi = self.hidpi.unwrap_or(scale >= 1.75);
         if let Some((w, hh, hz)) = self.mode {
             (h.width, h.height, h.refresh_mhz) = (w, hh, hz);
-        } else {
-            let div = if h.hidpi { 2 } else { 1 };
-            h.width = (pw / div) as u16;
-            h.height = (ph / div) as u16;
-            let pixels = (pw * ph) as f64;
-            h.refresh_mhz = [mhz, 120_000, 100_000, 60_000]
-                .into_iter()
-                .find(|&r| r <= mhz && pixels * r as f64 / 1000.0 <= ENCODER_PIXEL_RATE)
-                .unwrap_or(60_000);
-            if h.refresh_mhz != mhz {
-                println!(
-                    "note: monitor runs at {:.0} Hz but the Mac encoder tops out at {:.0} Hz for {pw}x{ph}",
-                    mhz as f64 / 1000.0,
-                    h.refresh_mhz as f64 / 1000.0
-                );
-            }
+            return (h, hz);
         }
-        h
+        let div = if h.hidpi { 2 } else { 1 };
+        h.width = (pw / div) as u16;
+        h.height = (ph / div) as u16;
+        let pixels = (pw * ph) as f64;
+        let max = [mhz, 120_000, 100_000, 60_000]
+            .into_iter()
+            .find(|&r| r <= mhz && pixels * r as f64 / 1000.0 <= ENCODER_PIXEL_RATE)
+            .unwrap_or(60_000);
+        if max != mhz {
+            println!(
+                "note: monitor runs at {:.0} Hz but the Mac encoder tops out at {:.0} Hz for {pw}x{ph}",
+                mhz as f64 / 1000.0,
+                max as f64 / 1000.0
+            );
+        }
+        h.refresh_mhz = self.refresh.map_or(max, |r| r.min(max));
+        (h, max)
     }
 }
 
@@ -356,7 +371,7 @@ impl App {
             ),
             None => el.primary_monitor().or_else(|| monitors.first().cloned()),
         };
-        let hello = self.args.hello(monitor.as_ref());
+        let (hello, max_refresh) = self.args.hello(monitor.as_ref());
         let addr = self.args.server_addr()?;
         println!(
             "connecting to {addr}: requesting {}",
@@ -407,7 +422,20 @@ impl App {
         let (tx, rx) = sync_channel(64);
         receiver::spawn(addr, control.clone(), stats.clone(), tx, self.stop.clone())?;
 
-        let mut decoder = Decoder::open(&self.args.hwaccel, self.args.threads)?;
+        // A fresh decoder per stream format: FFmpeg 6.1 crashes when a running VA-API decoder falls
+        // back to software mid-stream (4:2:0 -> 4:4:4 on AMD), and 4:4:4 never decodes on VA-API
+        // anyway, so open it in software directly.
+        let (hwaccel, threads) = (self.args.hwaccel.clone(), self.args.threads);
+        let open_for = move |s: &Start| {
+            let hw = if s.chroma444 && hwaccel == "auto" {
+                "none"
+            } else {
+                hwaccel.as_str()
+            };
+            Decoder::open(hw, threads)
+        };
+        let mut decoder = open_for(&start)?;
+        let mut decoder_session = start.session_id;
         let (proxy, dstats, dcontrol) = (self.proxy.clone(), stats.clone(), control.clone());
         thread::Builder::new()
             .name("decode".into())
@@ -419,6 +447,15 @@ impl App {
                 let mut expected: Option<u32> = None;
                 let mut last_request = Instant::now() - Duration::from_secs(1);
                 for frame in rx {
+                    if frame.session != decoder_session {
+                        let start = *dcontrol.current.lock().unwrap();
+                        match open_for(&start) {
+                            Ok(d) => decoder = d,
+                            Err(e) => eprintln!("{e:#}"),
+                        }
+                        decoder_session = frame.session;
+                        expected = None;
+                    }
                     let in_sequence = frame.keyframe || expected == Some(frame.frame_id);
                     if !in_sequence {
                         if expected.is_some() {
@@ -457,8 +494,9 @@ impl App {
                 }
             })?;
 
-        let mut refresh_choices = vec![hello.refresh_mhz, 120_000, 60_000];
-        refresh_choices.retain(|&r| r <= hello.refresh_mhz);
+        let mut refresh_choices = vec![max_refresh, 120_000, 60_000, hello.refresh_mhz];
+        refresh_choices.retain(|&r| r <= max_refresh);
+        refresh_choices.sort_unstable_by(|a, b| b.cmp(a));
         refresh_choices.dedup();
         Ok(Running {
             window,

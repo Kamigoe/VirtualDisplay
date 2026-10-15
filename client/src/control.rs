@@ -17,6 +17,8 @@ pub struct Control {
     pub clock: Arc<Mutex<ClockSync>>,
     /// Current video session; changes when the sender answers a re-sent Hello with a new Start.
     pub session: Arc<AtomicU32>,
+    /// Start message of the current session (format of the stream).
+    pub current: Arc<Mutex<Start>>,
 }
 
 impl Control {
@@ -54,10 +56,12 @@ impl Control {
             writer: Mutex::new(stream.try_clone()?),
             clock: Arc::new(Mutex::new(ClockSync::default())),
             session: Arc::new(AtomicU32::new(start.session_id)),
+            current: Arc::new(Mutex::new(start)),
         });
 
         let clock = control.clock.clone();
         let session = control.session.clone();
+        let current = control.current.clone();
         thread::Builder::new()
             .name("control-rx".into())
             .spawn(move || {
@@ -71,6 +75,7 @@ impl Control {
                         }
                         Ok((protocol::MSG_START, body)) => match Start::decode(&body) {
                             Ok(s) => {
+                                *current.lock().unwrap() = s;
                                 session.store(s.session_id, Ordering::Relaxed);
                                 on_restart(s);
                             }
