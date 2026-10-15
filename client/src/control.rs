@@ -2,6 +2,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -14,14 +15,18 @@ use crate::protocol::{self, Hello, Start};
 pub struct Control {
     writer: Mutex<TcpStream>,
     pub clock: Arc<Mutex<ClockSync>>,
+    /// Current video session; changes when the sender answers a re-sent Hello with a new Start.
+    pub session: Arc<AtomicU32>,
 }
 
 impl Control {
-    /// Connects, sends Hello and waits for Start. Spawns a reader thread for Pong/Error;
-    /// `on_closed` runs on that thread when the sender goes away.
+    /// Connects, sends Hello and waits for Start. Spawns a reader thread for Pong/Start/Error;
+    /// `on_restart` runs there for each later Start (after `reconfigure`), `on_closed` when the
+    /// sender goes away.
     pub fn connect(
         addr: SocketAddr,
         hello: &Hello,
+        on_restart: impl Fn(Start) + Send + 'static,
         on_closed: impl FnOnce(String) + Send + 'static,
     ) -> Result<(Arc<Control>, Start)> {
         let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
@@ -48,9 +53,11 @@ impl Control {
         let control = Arc::new(Control {
             writer: Mutex::new(stream.try_clone()?),
             clock: Arc::new(Mutex::new(ClockSync::default())),
+            session: Arc::new(AtomicU32::new(start.session_id)),
         });
 
         let clock = control.clock.clone();
+        let session = control.session.clone();
         thread::Builder::new()
             .name("control-rx".into())
             .spawn(move || {
@@ -62,6 +69,13 @@ impl Control {
                                 clock.lock().unwrap().add_sample(sent, server, now_us());
                             }
                         }
+                        Ok((protocol::MSG_START, body)) => match Start::decode(&body) {
+                            Ok(s) => {
+                                session.store(s.session_id, Ordering::Relaxed);
+                                on_restart(s);
+                            }
+                            Err(e) => eprintln!("bad Start: {e:#}"),
+                        },
                         Ok((protocol::MSG_ERROR, body)) => {
                             break String::from_utf8_lossy(&body).into_owned();
                         }
@@ -73,6 +87,11 @@ impl Control {
             })?;
 
         Ok((control, start))
+    }
+
+    /// Asks for a different mode/format on the running connection; answered by a new Start.
+    pub fn reconfigure(&self, hello: &Hello) {
+        self.send(protocol::MSG_HELLO, &hello.encode());
     }
 
     pub fn request_keyframe(&self) {

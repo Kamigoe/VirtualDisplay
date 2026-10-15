@@ -106,7 +106,10 @@ impl Renderer {
         let caps = surface.get_capabilities(&adapter);
         // Prefer a plain 8-bit non-sRGB swapchain: the decoded values are already gamma-encoded.
         // Float formats (Rgba16Float, offered first on Wayland/RADV) may be composited as linear.
-        let preferred = [wgpu::TextureFormat::Bgra8Unorm, wgpu::TextureFormat::Rgba8Unorm];
+        let preferred = [
+            wgpu::TextureFormat::Bgra8Unorm,
+            wgpu::TextureFormat::Rgba8Unorm,
+        ];
         if let Some(f) = preferred.into_iter().find(|f| caps.formats.contains(f)) {
             config.format = f;
         }
@@ -314,11 +317,8 @@ impl Common {
         } else {
             [va / sa, 1.0]
         };
-        self.queue.write_buffer(
-            &self.params,
-            0,
-            &params_bytes(scale, v, srgb_out, dither),
-        );
+        self.queue
+            .write_buffer(&self.params, 0, &params_bytes(scale, v, srgb_out, dither));
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &v.bind_group, &[]);
         pass.draw(0..6, 0..1);
@@ -331,9 +331,16 @@ impl Uploader {
     pub fn upload(&self, pic: &Picture, capture_us: u64) {
         let c = &self.0;
         let mut shared = c.shared.lock().unwrap();
-        if pic.wide && !c.device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM) {
+        if pic.wide
+            && !c
+                .device
+                .features()
+                .contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM)
+        {
             static WARNED: std::sync::Once = std::sync::Once::new();
-            WARNED.call_once(|| eprintln!("this GPU lacks 16-bit normalized textures; use --bit-depth 8"));
+            WARNED.call_once(|| {
+                eprintln!("this GPU lacks 16-bit normalized textures; use --bit-depth 8")
+            });
             return;
         }
         let stale = shared.video.as_ref().is_none_or(|v| {

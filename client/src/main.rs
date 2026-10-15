@@ -45,6 +45,10 @@ usage: vdview <mac-host>[:port] [options]
   --windowed            start in a window instead of borderless fullscreen (F11 toggles)
   --vsync               present with FIFO (no tearing, +latency) instead of mailbox/immediate
 
+keys while running:
+  F2  8-bit <-> 10-bit      F3  4:2:0 <-> 4:4:4      F4  cycle refresh rate (max / 120 / 60 Hz)
+  F11 fullscreen on/off     Esc leave fullscreen
+
 self-test (no sender or display needed):
   vdview --snapshot IN.hevc OUT.ppm [--hwaccel NAME]
       decode the first picture of an Annex-B file and write what the renderer draws
@@ -208,7 +212,20 @@ impl Args {
 
 enum UserEvent {
     FrameReady,
+    /// The sender answered a reconfiguration with a new stream.
+    Restarted(Start),
     Closed(String),
+}
+
+fn describe_start(s: &Start) -> String {
+    format!(
+        "{}x{} @ {:.2} Hz, HEVC {} {}-bit",
+        s.pixel_width,
+        s.pixel_height,
+        s.refresh_mhz as f64 / 1000.0,
+        if s.chroma444 { "4:4:4" } else { "4:2:0" },
+        s.bit_depth
+    )
 }
 
 struct Running {
@@ -217,8 +234,30 @@ struct Running {
     control: Arc<Control>,
     stats: Arc<Stats>,
     start: Start,
-    decoder_name: String,
     next_stats: Instant,
+    /// What we last asked for; F2-F4 edit it and re-send it.
+    hello: Hello,
+    /// Refresh rates F4 cycles through (mHz, highest first).
+    refresh_choices: Vec<u32>,
+}
+
+impl Running {
+    fn reconfigure(&mut self, what: &str) {
+        println!(
+            "requesting {what}: {}x{}{} @ {:.0} Hz, {} {}-bit",
+            self.hello.width,
+            self.hello.height,
+            if self.hello.hidpi { " HiDPI" } else { "" },
+            self.hello.refresh_mhz as f64 / 1000.0,
+            if self.hello.chroma444 {
+                "4:4:4"
+            } else {
+                "4:2:0"
+            },
+            if self.hello.bit_depth == 10 { 10 } else { 8 }
+        );
+        self.control.reconfigure(&self.hello);
+    }
 }
 
 struct App {
@@ -271,17 +310,18 @@ impl App {
             }
         );
         let proxy = self.proxy.clone();
-        let (control, start) = Control::connect(addr, &hello, move |reason| {
-            let _ = proxy.send_event(UserEvent::Closed(reason));
-        })?;
-        println!(
-            "stream: {}x{} @ {:.2} Hz, HEVC {} {}-bit",
-            start.pixel_width,
-            start.pixel_height,
-            start.refresh_mhz as f64 / 1000.0,
-            if start.chroma444 { "4:4:4" } else { "4:2:0" },
-            start.bit_depth
-        );
+        let restart_proxy = self.proxy.clone();
+        let (control, start) = Control::connect(
+            addr,
+            &hello,
+            move |s| {
+                let _ = restart_proxy.send_event(UserEvent::Restarted(s));
+            },
+            move |reason| {
+                let _ = proxy.send_event(UserEvent::Closed(reason));
+            },
+        )?;
+        println!("stream: {}", describe_start(&start));
 
         let mut attrs = Window::default_attributes().with_title("vdview");
         if self.args.windowed {
@@ -301,17 +341,9 @@ impl App {
         // When a stalled frame is finally repaired, every frame queued behind it is released at once;
         // decoding them (~6 ms each) catches up faster than resyncing on a large keyframe over Wi-Fi.
         let (tx, rx) = sync_channel(64);
-        receiver::spawn(
-            addr,
-            start.session_id,
-            control.clone(),
-            stats.clone(),
-            tx,
-            self.stop.clone(),
-        )?;
+        receiver::spawn(addr, control.clone(), stats.clone(), tx, self.stop.clone())?;
 
         let mut decoder = Decoder::open(&self.args.hwaccel, self.args.threads)?;
-        let decoder_name = decoder.describe();
         let (proxy, dstats, dcontrol) = (self.proxy.clone(), stats.clone(), control.clone());
         thread::Builder::new()
             .name("decode".into())
@@ -361,14 +393,18 @@ impl App {
                 }
             })?;
 
+        let mut refresh_choices = vec![hello.refresh_mhz, 120_000, 60_000];
+        refresh_choices.retain(|&r| r <= hello.refresh_mhz);
+        refresh_choices.dedup();
         Ok(Running {
             window,
             renderer,
             control,
             stats,
             start,
-            decoder_name,
             next_stats: Instant::now() + STATS_EVERY,
+            hello,
+            refresh_choices,
         })
     }
 }
@@ -428,6 +464,31 @@ impl ApplicationHandler<UserEvent> for App {
                     r.window.set_fullscreen(None);
                     r.window.set_cursor_visible(true);
                 }
+                Key::Named(NamedKey::F2) => {
+                    if r.hello.chroma444 {
+                        println!("4:4:4 is 8-bit only on the Mac's encoder");
+                    } else {
+                        r.hello.bit_depth = if r.hello.bit_depth == 10 { 8 } else { 10 };
+                        r.reconfigure("bit depth");
+                    }
+                }
+                Key::Named(NamedKey::F3) => {
+                    r.hello.chroma444 = !r.hello.chroma444;
+                    r.reconfigure("chroma");
+                }
+                Key::Named(NamedKey::F4) => {
+                    if r.hello.width == 0 {
+                        println!("refresh switching needs a requested mode (not --server-mode)");
+                    } else if r.refresh_choices.len() > 1 {
+                        let i = r
+                            .refresh_choices
+                            .iter()
+                            .position(|&c| c == r.hello.refresh_mhz)
+                            .unwrap_or(0);
+                        r.hello.refresh_mhz = r.refresh_choices[(i + 1) % r.refresh_choices.len()];
+                        r.reconfigure("refresh rate");
+                    }
+                }
                 _ => {}
             },
             _ => {}
@@ -439,6 +500,12 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::FrameReady => {
                 if let Some(r) = &self.running {
                     r.window.request_redraw();
+                }
+            }
+            UserEvent::Restarted(start) => {
+                println!("stream: {}", describe_start(&start));
+                if let Some(r) = self.running.as_mut() {
+                    r.start = start;
                 }
             }
             UserEvent::Closed(reason) => {
@@ -457,13 +524,8 @@ impl ApplicationHandler<UserEvent> for App {
             let rtt = r.control.clock.lock().unwrap().rtt_us();
             let line = r.stats.drain(STATS_EVERY.as_secs_f64(), rtt);
             println!("{line}");
-            r.window.set_title(&format!(
-                "vdview {}x{}@{:.0} [{}] | {line}",
-                r.start.pixel_width,
-                r.start.pixel_height,
-                r.start.refresh_mhz as f64 / 1000.0,
-                r.decoder_name
-            ));
+            r.window
+                .set_title(&format!("vdview {} | {line}", describe_start(&r.start)));
             r.next_stats = now + STATS_EVERY;
         }
         el.set_control_flow(ControlFlow::WaitUntil(r.next_stats));
@@ -524,7 +586,9 @@ fn split_access_units(data: &[u8]) -> Vec<&[u8]> {
             if let Some(st) = au_start {
                 let has_slice = starts
                     .iter()
-                    .filter(|(s2, n2)| *s2 >= st && *s2 < sc && data.get(*n2).is_some_and(|b| (b >> 1) & 0x3f < 32))
+                    .filter(|(s2, n2)| {
+                        *s2 >= st && *s2 < sc && data.get(*n2).is_some_and(|b| (b >> 1) & 0x3f < 32)
+                    })
                     .count()
                     > 0;
                 if has_slice {
@@ -576,7 +640,11 @@ fn main() -> ExitCode {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
         };
-        let hwaccel = argv.iter().position(|a| a == "--hwaccel").and_then(|i| argv.get(i + 1)).map_or("auto", String::as_str);
+        let hwaccel = argv
+            .iter()
+            .position(|a| a == "--hwaccel")
+            .and_then(|i| argv.get(i + 1))
+            .map_or("auto", String::as_str);
         return match decode_test(input, hwaccel) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {

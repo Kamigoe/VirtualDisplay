@@ -95,6 +95,10 @@ struct Options: Equatable {
             default: fail("unknown option \(a)")
             }
         }
+        if o.chroma == 444 && o.bitDepth == 10 {
+            FileHandle.standardError.write(Data("vdsend: 4:4:4 is 8-bit only on this encoder; using 8-bit\n".utf8))
+            o.bitDepth = 8
+        }
         return o
     }
 

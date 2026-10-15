@@ -143,6 +143,8 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
                 }
                 o.chroma = chroma == 1 ? 444 : 420
                 if let bitDepth { o.bitDepth = bitDepth }
+                // The M1 encoder emits 8-bit RExt for 4:4:4 even from 10-bit input.
+                if o.chroma == 444 { o.bitDepth = 8 }
                 if bitrateKbps > 0 { o.bitrateMbps = Double(bitrateKbps) / 1000 }
             }
             self.streamer.addViewer(Self.viewerID)

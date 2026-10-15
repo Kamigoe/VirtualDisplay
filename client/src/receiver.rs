@@ -79,7 +79,6 @@ const RECV_BUFFER: usize = 8 << 20;
 
 pub fn spawn(
     server: SocketAddr,
-    session_id: u32,
     control: Arc<Control>,
     stats: Arc<Stats>,
     out: SyncSender<EncodedFrame>,
@@ -112,7 +111,7 @@ pub fn spawn(
 
     let mut rx = Receiver {
         socket,
-        session_id,
+        session_id: control.session.load(Ordering::Relaxed),
         control,
         stats,
         out,
@@ -151,6 +150,16 @@ impl Receiver {
         let mut last_ping: Option<Instant> = None;
         while !stop.load(Ordering::Relaxed) {
             let now = Instant::now();
+            let current = self.control.session.load(Ordering::Relaxed);
+            if current != self.session_id {
+                // The sender restarted the stream (mode/format change): start over from its
+                // first keyframe and tell it where to send right away.
+                self.session_id = current;
+                self.frames.clear();
+                self.waiting_for_keyframe = true;
+                self.stall_since = None;
+                last_keepalive = None;
+            }
             if last_keepalive.is_none_or(|t| now - t >= KEEPALIVE_EVERY) {
                 let _ = self.socket.send(&protocol::keepalive(self.session_id));
                 last_keepalive = Some(now);
