@@ -54,8 +54,17 @@ impl Stats {
         self.0.lock().unwrap().latency_us.push(us);
     }
 
-    pub fn drain(&self, interval_s: f64, rtt_us: Option<u64>) -> String {
+    /// One-line log summary plus the key numbers for the on-screen display; resets the counters.
+    pub fn drain(&self, interval_s: f64, rtt_us: Option<u64>) -> (String, Summary) {
         let mut s = self.0.lock().unwrap();
+        let summary = Summary {
+            fps: s.frames_presented as f64 / interval_s,
+            mbps: s.bytes as f64 * 8.0 / interval_s / 1e6,
+            latency_ms: pct(&mut s.latency_us, 0.5).map(|us| us as f64 / 1000.0),
+            decode_ms: pct(&mut s.decode_us, 0.5).map(|us| us as f64 / 1000.0),
+            decoder: s.decoder_path.clone(),
+            lost: s.frames_lost,
+        };
         let line = format!(
             "{:5.1} fps (shown {:5.1}) | {:6.1} Mbps | latency p50 {} p95 {} | decode p50 {} [{}] | rtt {} | nack {} lost {} kf-req {}",
             s.frames_decoded as f64 / interval_s,
@@ -75,8 +84,18 @@ impl Stats {
             decoder_path: path,
             ..Default::default()
         };
-        line
+        (line, summary)
     }
+}
+
+#[derive(Clone, Default)]
+pub struct Summary {
+    pub fps: f64,
+    pub mbps: f64,
+    pub latency_ms: Option<f64>,
+    pub decode_ms: Option<f64>,
+    pub decoder: String,
+    pub lost: u64,
 }
 
 fn pct(v: &mut [u32], p: f64) -> Option<u32> {

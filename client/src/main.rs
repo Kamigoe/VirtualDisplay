@@ -3,6 +3,7 @@
 mod clock;
 mod control;
 mod decoder;
+mod osd;
 mod protocol;
 mod receiver;
 mod render;
@@ -239,7 +240,14 @@ struct Running {
     hello: Hello,
     /// Refresh rates F4 cycles through (mHz, highest first).
     refresh_choices: Vec<u32>,
+    /// Status panel: shown while pinned (F1), until `osd_until`, or while a switch is pending.
+    osd_pinned: bool,
+    osd_until: Option<Instant>,
+    switching: bool,
+    summary: stats::Summary,
 }
+
+const OSD_SHOW: Duration = Duration::from_secs(5);
 
 impl Running {
     fn reconfigure(&mut self, what: &str) {
@@ -257,6 +265,62 @@ impl Running {
             if self.hello.bit_depth == 10 { 10 } else { 8 }
         );
         self.control.reconfigure(&self.hello);
+        self.switching = true;
+        self.flash_osd();
+    }
+
+    fn flash_osd(&mut self) {
+        self.osd_until = Some(Instant::now() + OSD_SHOW);
+        self.update_osd();
+    }
+
+    fn osd_visible(&self) -> bool {
+        self.osd_pinned || self.switching || self.osd_until.is_some_and(|t| Instant::now() < t)
+    }
+
+    /// Re-renders (or hides) the status panel and redraws so it shows even on a static screen.
+    fn update_osd(&mut self) {
+        let lines = if self.osd_visible() {
+            let s = &self.start;
+            let ms = |v: Option<f64>| v.map_or("-".to_string(), |v| format!("{v:.1}MS"));
+            vec![
+                format!(
+                    "{}X{} @ {:.0}HZ   {}  {}-BIT{}",
+                    s.pixel_width,
+                    s.pixel_height,
+                    s.refresh_mhz as f64 / 1000.0,
+                    if s.chroma444 { "4:4:4" } else { "4:2:0" },
+                    s.bit_depth,
+                    if self.switching {
+                        "   SWITCHING..."
+                    } else {
+                        ""
+                    }
+                ),
+                format!(
+                    "{:.0} FPS   LATENCY {}   DECODE {} {}   {:.1} MBPS{}",
+                    self.summary.fps,
+                    ms(self.summary.latency_ms),
+                    ms(self.summary.decode_ms),
+                    self.summary.decoder,
+                    self.summary.mbps,
+                    if self.summary.lost > 0 {
+                        format!("   LOST {}", self.summary.lost)
+                    } else {
+                        String::new()
+                    }
+                ),
+                format!(
+                    "F1 {}  F2 BIT DEPTH  F3 CHROMA  F4 REFRESH  F11 FULLSCREEN",
+                    if self.osd_pinned { "HIDE" } else { "PIN" }
+                ),
+            ]
+        } else {
+            vec![]
+        };
+        let scale = (3.0 * self.window.scale_factor()).round() as usize;
+        self.renderer.set_osd(lines, scale);
+        self.window.request_redraw();
     }
 }
 
@@ -405,6 +469,10 @@ impl App {
             next_stats: Instant::now() + STATS_EVERY,
             hello,
             refresh_choices,
+            osd_pinned: false,
+            osd_until: Some(Instant::now() + OSD_SHOW),
+            switching: false,
+            summary: Default::default(),
         })
     }
 }
@@ -464,6 +532,11 @@ impl ApplicationHandler<UserEvent> for App {
                     r.window.set_fullscreen(None);
                     r.window.set_cursor_visible(true);
                 }
+                Key::Named(NamedKey::F1) => {
+                    r.osd_pinned = !r.osd_pinned;
+                    r.osd_until = None;
+                    r.update_osd();
+                }
                 Key::Named(NamedKey::F2) => {
                     if r.hello.chroma444 {
                         println!("4:4:4 is 8-bit only on the Mac's encoder");
@@ -506,6 +579,8 @@ impl ApplicationHandler<UserEvent> for App {
                 println!("stream: {}", describe_start(&start));
                 if let Some(r) = self.running.as_mut() {
                     r.start = start;
+                    r.switching = false;
+                    r.flash_osd();
                 }
             }
             UserEvent::Closed(reason) => {
@@ -522,13 +597,20 @@ impl ApplicationHandler<UserEvent> for App {
         let now = Instant::now();
         if now >= r.next_stats {
             let rtt = r.control.clock.lock().unwrap().rtt_us();
-            let line = r.stats.drain(STATS_EVERY.as_secs_f64(), rtt);
+            let (line, summary) = r.stats.drain(STATS_EVERY.as_secs_f64(), rtt);
             println!("{line}");
             r.window
                 .set_title(&format!("vdview {} | {line}", describe_start(&r.start)));
+            r.summary = summary;
             r.next_stats = now + STATS_EVERY;
+            r.update_osd();
         }
-        el.set_control_flow(ControlFlow::WaitUntil(r.next_stats));
+        if r.osd_until.is_some_and(|t| now >= t) {
+            r.osd_until = None;
+            r.update_osd();
+        }
+        let wake = r.osd_until.map_or(r.next_stats, |t| t.min(r.next_stats));
+        el.set_control_flow(ControlFlow::WaitUntil(wake));
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {

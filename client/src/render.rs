@@ -50,6 +50,7 @@ pub struct Renderer {
     pipeline: wgpu::RenderPipeline,
     srgb_out: bool,
     presented_serial: u64,
+    osd: crate::osd::Osd,
 }
 
 /// Mirrors `Params` in shader.wgsl (32 bytes).
@@ -130,6 +131,7 @@ impl Renderer {
         );
 
         let (common, pipeline) = Common::build(device, queue, config.format);
+        let osd = crate::osd::Osd::new(&common.device, config.format);
         let renderer = Renderer {
             common: common.clone(),
             surface,
@@ -137,8 +139,15 @@ impl Renderer {
             pipeline,
             srgb_out,
             presented_serial: 0,
+            osd,
         };
         Ok((renderer, Uploader(common)))
+    }
+
+    /// Status panel text (empty hides it); `scale` = screen pixels per font pixel.
+    pub fn set_osd(&mut self, lines: Vec<String>, scale: usize) {
+        let c = &self.common;
+        self.osd.set_text(&c.device, &c.queue, lines, scale);
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -171,6 +180,13 @@ impl Renderer {
             (self.config.width, self.config.height),
             self.srgb_out,
             true, // 10-bit content onto an 8-bit swapchain
+        );
+        self.osd.draw(
+            &c.queue,
+            &mut encoder,
+            &view,
+            self.config.width,
+            self.config.height,
         );
         let fresh = match drawn {
             Some((serial, capture_us)) if serial != self.presented_serial => {
