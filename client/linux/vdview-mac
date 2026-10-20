@@ -1,0 +1,8 @@
+#!/bin/sh
+# Show the Mac's virtual display (vdsend must be running on the Mac); vdview reconnects by itself.
+# Extra arguments are passed to vdview, e.g. --chroma 420. Log: ~/.cache/vdview.log
+MAC="${VD_MAC:-ikedaakiranoMacBook-Air.local}"
+LOG="$HOME/.cache/vdview.log"
+mkdir -p "$(dirname "$LOG")"
+echo "=== $(date "+%F %T") vdview-mac $*" >>"$LOG"
+exec "$HOME/VirtualDisplay/client/target/release/vdview" "$MAC" "$@" >>"$LOG" 2>&1

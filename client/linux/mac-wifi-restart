@@ -1,0 +1,15 @@
+#!/bin/sh
+# Turns the Mac's Wi-Fi off and on (for a flaky link). Uses ~/.ssh/vd_mac, which the Mac only
+# accepts for this one command. Falls back to the last known IP if mDNS does not resolve.
+MAC="${VD_MAC:-ikedaakiranoMacBook-Air.local}"
+MAC_IP="${VD_MAC_IP:-192.168.11.18}"
+for host in "$MAC" "$MAC_IP"; do
+    if ssh -i "$HOME/.ssh/vd_mac" -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
+           "akira@$host" restart 2>/dev/null; then
+        notify-send "Mac Wi-Fi" "Restarting Wi-Fi on the Mac (back in ~10 s)" 2>/dev/null || true
+        exit 0
+    fi
+done
+notify-send "Mac Wi-Fi" "Could not reach the Mac" 2>/dev/null || true
+echo "could not reach the Mac" >&2
+exit 1

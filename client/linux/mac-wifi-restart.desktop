@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Mac Wi-Fi Restart (VirtualDisplay)
+Comment=Turn the Mac's Wi-Fi off and on
+Exec=sh -c '"$HOME/.local/bin/mac-wifi-restart"'
+Icon=network-wireless
+Terminal=false
+Categories=Utility;

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Mac (VirtualDisplay)
+Comment=Show the Mac virtual display streamed by vdsend
+Exec=sh -c '"$HOME/.local/bin/vdview-mac"'
+Icon=video-display
+Terminal=false
+Categories=Utility;

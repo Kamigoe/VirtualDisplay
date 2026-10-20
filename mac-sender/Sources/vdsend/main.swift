@@ -1,5 +1,21 @@
 import Foundation
 
+import CoreGraphics
+
+// Permission helpers for the installed app bundle (run via `open vdsend.app --args ...` so macOS
+// attributes the request to the app, not the terminal).
+if CommandLine.arguments.contains("--check-permission") {
+    let ok = CGPreflightScreenCaptureAccess()
+    print("screen recording permission: \(ok ? "granted" : "not granted")")
+    exit(ok ? 0 : 1)
+}
+if CommandLine.arguments.contains("--request-permission") {
+    // Adds vdsend to System Settings > Privacy & Security > Screen & System Audio Recording.
+    let ok = CGRequestScreenCaptureAccess()
+    print("screen recording permission: \(ok ? "granted" : "requested (enable vdsend in System Settings)")")
+    exit(ok ? 0 : 1)
+}
+
 let options = Options.parse(Array(CommandLine.arguments.dropFirst()))
 let stats = Stats()
 
