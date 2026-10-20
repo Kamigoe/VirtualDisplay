@@ -4,16 +4,26 @@ import CoreGraphics
 
 // Permission helpers for the installed app bundle (run via `open vdsend.app --args ...` so macOS
 // attributes the request to the app, not the terminal).
+/// Prints and appends to ~/Library/Logs/vdsend-permission.log (stdout is lost when run via `open`).
+func reportPermission(_ line: String) -> Never {
+    print(line)
+    let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/vdsend-permission.log")
+    let entry = Data("\(Date()) \(line)\n".utf8)
+    if let h = try? FileHandle(forWritingTo: url) {
+        h.seekToEndOfFile()
+        h.write(entry)
+    } else {
+        try? entry.write(to: url)
+    }
+    exit(line.hasSuffix(": granted") ? 0 : 1)
+}
 if CommandLine.arguments.contains("--check-permission") {
-    let ok = CGPreflightScreenCaptureAccess()
-    print("screen recording permission: \(ok ? "granted" : "not granted")")
-    exit(ok ? 0 : 1)
+    reportPermission("screen recording permission: \(CGPreflightScreenCaptureAccess() ? "granted" : "not granted")")
 }
 if CommandLine.arguments.contains("--request-permission") {
     // Adds vdsend to System Settings > Privacy & Security > Screen & System Audio Recording.
     let ok = CGRequestScreenCaptureAccess()
-    print("screen recording permission: \(ok ? "granted" : "requested (enable vdsend in System Settings)")")
-    exit(ok ? 0 : 1)
+    reportPermission("screen recording permission: \(ok ? "granted" : "requested; enable vdsend in System Settings")")
 }
 
 let options = Options.parse(Array(CommandLine.arguments.dropFirst()))

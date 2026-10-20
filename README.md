@@ -139,6 +139,45 @@ vdview --snapshot 画像.hevc 出力.ppm [--hwaccel none]
 
 ---
 
+## 運用（自動起動・ネットワーク断・再起動）
+
+### Mac：自動起動のインストール
+
+```sh
+mac-sender/scripts/install.sh            # 既定の引数: --mode 3440x1440@60 --main
+```
+
+- `~/Library/VirtualDisplay/vdsend.app` に署名付きで入れ、ログイン時に起動・落ちたら再起動する LaunchAgent を登録する。
+  署名は固定の自己署名証明書（`make-signing-identity.sh`）なので、再ビルドしても画面収録の許可が外れない。
+- 初回のみ：`open -a ~/Library/VirtualDisplay/vdsend.app --args --request-permission` を実行し、
+  システム設定 > プライバシーとセキュリティ > 画面収録とシステムオーディオ録音 で vdsend をオンにする。
+- 更新：同じ `install.sh` を再実行（動いていたエージェントは自動で再起動）。削除：`uninstall.sh`。
+- ログ：`~/Library/Logs/vdsend.log`、Wi-Fi 関連は `~/Library/Logs/vdsend-wifi.log`。
+
+### ネットワークが切れたとき
+
+- `vdview` は接続が切れても終了せず、2 秒ごとに再接続する（左上に RECONNECTING）。Pong が 3 秒途絶えたら切断とみなす。
+- Mac の Wi-Fi 監視（20 秒ごと）：ルーターに約 1 分届かなければ Wi-Fi をオフ→オン。Wi-Fi がオフなら自動でオンに戻す。
+- 調子が悪いだけなら PC から再起動できる：アプリ一覧の「Mac Wi-Fi Restart (VirtualDisplay)」または `mac-wifi-restart`。
+  この操作に使う SSH 鍵（Ubuntu の `~/.ssh/vd_mac`）は、Mac 側でこのコマンド専用に制限してある。
+
+### Mac を再起動したとき（FileVault 有効）
+
+1. **ロック解除**：PC から `ssh akira@192.168.11.18` → Mac のログインパスワード（macOS 26 の起動前 SSH）。
+   起動前は mDNS 名が引けない可能性があるので IP で接続する（ルーターで IP 固定推奨）。
+   予備手段：蓋を開け、本体キーボードでパスワード入力 → Return（入力欄は最初から選択されている）。
+2. **ログイン**：ロック解除でそのままログインされるはず。ログイン画面で止まった場合は PC から VNC（Remmina）で
+   `192.168.11.18` に接続してログインする。
+3. **vdsend**：LaunchAgent が自動起動。PC のアプリはそのまま待っていれば再接続する。
+
+計画的な再起動は `sudo fdesetup authrestart` で 1 回だけロック解除を省略できる。
+
+## PC 側ランチャー（Ubuntu）
+
+```sh
+client/linux/install.sh     # vdview-mac / mac-wifi-restart とアプリ一覧のエントリを入れる
+```
+
 ## 実測（M1 / macOS 26.5.1）
 
 **エンコード（送信側）**
