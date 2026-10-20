@@ -18,7 +18,7 @@ struct Options: Equatable {
     var name = "VirtualDisplay"
     var makeMain = false
     var mirrorBuiltin = false
-    /// nil = decide automatically from pixel rate.
+    /// nil = default (speed priority on).
     var prioritizeSpeed: Bool? = nil
     /// Re-encode the last frame shortly after the screen goes still so text sharpens up.
     var refineIdle = true
@@ -42,7 +42,7 @@ struct Options: Equatable {
       --name NAME          display name shown in System Settings (default VirtualDisplay)
       --main               make the virtual display the main display while running
       --mirror-builtin     mirror the built-in panel onto the virtual display while running
-      --fast / --no-fast   force VideoToolbox speed-over-quality on/off (default: auto)
+      --fast / --no-fast   VideoToolbox speed-over-quality on/off (default on; off is ~4x slower)
       --no-refine          do not re-encode the last frame when the screen goes idle
     """
 

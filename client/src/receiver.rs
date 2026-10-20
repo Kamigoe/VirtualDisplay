@@ -20,6 +20,8 @@ use crate::stats::Stats;
 pub struct EncodedFrame {
     pub data: Vec<u8>,
     pub capture_us: u64,
+    /// When the last packet arrived (viewer clock).
+    pub received_us: u64,
     pub frame_id: u32,
     pub session: u32,
     pub keyframe: bool,
@@ -262,6 +264,7 @@ impl Receiver {
                     match self.out.try_send(EncodedFrame {
                         data: a.data,
                         capture_us: a.capture_us,
+                        received_us: crate::clock::now_us(),
                         frame_id: id,
                         session: self.session_id,
                         keyframe: a.keyframe,

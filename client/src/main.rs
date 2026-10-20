@@ -534,7 +534,14 @@ fn spawn_decoder(
                 let t0 = Instant::now();
                 match decoder.decode(&frame.data) {
                     Ok(Some(pic)) => {
-                        uploader.upload(&pic, frame.capture_us);
+                        uploader.upload(
+                            &pic,
+                            render::FrameTimes {
+                                capture_us: frame.capture_us,
+                                received_us: frame.received_us,
+                                ready_us: 0,
+                            },
+                        );
                         stats.frame_decoded(t0.elapsed().as_micros() as u32, &decoder.describe());
                         let _ = proxy.send_event(UserEvent::FrameReady);
                     }
@@ -676,12 +683,18 @@ impl ApplicationHandler<UserEvent> for App {
                 r.window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
-                if let Some(capture_us) = r.renderer.render() {
+                if let Some(t) = r.renderer.render() {
                     r.stats.frame_presented();
                     if let Some(c) = &r.control {
                         let clock = c.clock.lock().unwrap();
-                        if let Some(local) = clock.server_to_client(capture_us) {
-                            r.stats.latency(now_us().saturating_sub(local) as u32);
+                        if let Some(local) = clock.server_to_client(t.capture_us) {
+                            let now = now_us();
+                            r.stats.latency(now.saturating_sub(local) as u32);
+                            r.stats.stages(
+                                t.received_us.saturating_sub(local) as u32,
+                                t.ready_us.saturating_sub(t.received_us) as u32,
+                                now.saturating_sub(t.ready_us) as u32,
+                            );
                         }
                     }
                 }

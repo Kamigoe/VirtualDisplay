@@ -8,6 +8,17 @@ use winit::window::Window;
 
 use crate::decoder::{Layout, Picture};
 
+/// Per-picture timestamps for the latency breakdown.
+#[derive(Clone, Copy, Default)]
+pub struct FrameTimes {
+    /// Composited on the Mac (sender clock).
+    pub capture_us: u64,
+    /// Last packet received (viewer clock).
+    pub received_us: u64,
+    /// Decoded and uploaded to the GPU (viewer clock; set by `Uploader::upload`).
+    pub ready_us: u64,
+}
+
 struct VideoTextures {
     layout: Layout,
     width: u32,
@@ -23,8 +34,8 @@ struct VideoTextures {
 #[derive(Default)]
 struct Shared {
     video: Option<VideoTextures>,
-    /// Sender capture time of the most recently uploaded picture.
-    capture_us: u64,
+    /// Timestamps of the most recently uploaded picture.
+    times: FrameTimes,
     /// Bumped on every upload so the renderer can tell a new picture from a redraw.
     serial: u64,
 }
@@ -161,7 +172,7 @@ impl Renderer {
     }
 
     /// Draws the latest picture. Returns its sender capture time if it had not been presented before.
-    pub fn render(&mut self) -> Option<u64> {
+    pub fn render(&mut self) -> Option<FrameTimes> {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
@@ -190,9 +201,9 @@ impl Renderer {
             self.config.height,
         );
         let fresh = match drawn {
-            Some((serial, capture_us)) if serial != self.presented_serial => {
+            Some((serial, times)) if serial != self.presented_serial => {
                 self.presented_serial = serial;
-                Some(capture_us)
+                Some(times)
             }
             _ => None,
         };
@@ -312,7 +323,7 @@ impl Common {
         (tw, th): (u32, u32),
         srgb_out: bool,
         dither: bool,
-    ) -> Option<(u64, u64)> {
+    ) -> Option<(u64, FrameTimes)> {
         let shared = self.shared.lock().unwrap();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("video"),
@@ -339,13 +350,13 @@ impl Common {
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &v.bind_group, &[]);
         pass.draw(0..6, 0..1);
-        Some((shared.serial, shared.capture_us))
+        Some((shared.serial, shared.times))
     }
 }
 
 impl Uploader {
     /// Called on the decoder thread; copies the planes into GPU textures.
-    pub fn upload(&self, pic: &Picture, capture_us: u64) {
+    pub fn upload(&self, pic: &Picture, times: FrameTimes) {
         let c = &self.0;
         let mut shared = c.shared.lock().unwrap();
         if pic.wide
@@ -394,7 +405,10 @@ impl Uploader {
                 },
             );
         }
-        shared.capture_us = capture_us;
+        shared.times = FrameTimes {
+            ready_us: crate::clock::now_us(),
+            ..times
+        };
         shared.serial += 1;
     }
 
@@ -520,7 +534,7 @@ pub fn snapshot(pic: &Picture) -> Result<Vec<u8>> {
     }))?;
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let (common, pipeline) = Common::build(device, queue, format);
-    Uploader(common.clone()).upload(pic, 0);
+    Uploader(common.clone()).upload(pic, FrameTimes::default());
 
     let (w, h) = (pic.width, pic.height);
     let target = common.device.create_texture(&wgpu::TextureDescriptor {

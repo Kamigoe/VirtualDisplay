@@ -50,7 +50,9 @@ final class Encoder {
         }
         session = s
 
-        let speed = o.prioritizeSpeed ?? (o.pixelRate > 400_000_000)
+        // Quality mode is far too slow on the M1 even at 60 Hz (3440x1440: ~44 ms/frame vs ~10 ms),
+        // so speed priority is the default; --no-fast opts out.
+        let speed = o.prioritizeSpeed ?? true
         let bytesPerSecond = o.bitrateMbps * 1_000_000 / 8
         var props: [(CFString, CFTypeRef)] = [
             (kVTCompressionPropertyKey_RealTime, kCFBooleanTrue),

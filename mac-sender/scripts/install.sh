@@ -76,6 +76,11 @@ PLIST
 
 for l in "$LABEL" "$LABEL.wifi"; do
     launchctl bootout "gui/$UIDN/$l" 2>/dev/null || true
+    # bootout returns before the job is gone; bootstrapping too early fails with EIO.
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        launchctl print "gui/$UIDN/$l" >/dev/null 2>&1 || break
+        sleep 0.5
+    done
 done
 launchctl bootstrap "gui/$UIDN" "$AGENTS/$LABEL.wifi.plist"
 if [ -n "$WAS_RUNNING" ]; then

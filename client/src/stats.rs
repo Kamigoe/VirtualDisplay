@@ -14,6 +14,10 @@ struct Inner {
     keyframe_requests: u64,
     decode_us: Vec<u32>,
     latency_us: Vec<u32>,
+    /// Breakdown: Mac composite -> received, received -> decoded+uploaded, uploaded -> presented.
+    net_us: Vec<u32>,
+    decode_wait_us: Vec<u32>,
+    show_us: Vec<u32>,
     decoder_path: String,
 }
 
@@ -49,6 +53,12 @@ impl Stats {
     pub fn frame_presented(&self) {
         self.0.lock().unwrap().frames_presented += 1;
     }
+    pub fn stages(&self, net_us: u32, decode_us: u32, show_us: u32) {
+        let mut s = self.0.lock().unwrap();
+        s.net_us.push(net_us);
+        s.decode_wait_us.push(decode_us);
+        s.show_us.push(show_us);
+    }
     /// Mac composite → presented on this machine.
     pub fn latency(&self, us: u32) {
         self.0.lock().unwrap().latency_us.push(us);
@@ -66,12 +76,15 @@ impl Stats {
             lost: s.frames_lost,
         };
         let line = format!(
-            "{:5.1} fps (shown {:5.1}) | {:6.1} Mbps | latency p50 {} p95 {} | decode p50 {} [{}] | rtt {} | nack {} lost {} kf-req {}",
+            "{:5.1} fps (shown {:5.1}) | {:6.1} Mbps | latency p50 {} p95 {} (p95 net {} dec {} show {}) | decode p50 {} [{}] | rtt {} | nack {} lost {} kf-req {}",
             s.frames_decoded as f64 / interval_s,
             s.frames_presented as f64 / interval_s,
             s.bytes as f64 * 8.0 / interval_s / 1e6,
             ms(pct(&mut s.latency_us, 0.5)),
             ms(pct(&mut s.latency_us, 0.95)),
+            ms(pct(&mut s.net_us, 0.95)),
+            ms(pct(&mut s.decode_wait_us, 0.95)),
+            ms(pct(&mut s.show_us, 0.95)),
             ms(pct(&mut s.decode_us, 0.5)),
             s.decoder_path,
             rtt_us.map_or("-".into(), |r| format!("{:.1}ms", r as f64 / 1000.0)),
