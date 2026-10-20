@@ -12,7 +12,7 @@ mod stats;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -229,9 +229,14 @@ impl Args {
 
 enum UserEvent {
     FrameReady,
+    /// A connection attempt (generation `gen`) succeeded.
+    Connected(u64, Arc<Control>, Start),
+    /// A connection attempt failed; the connector retries by itself.
+    ConnectFailed(u64, String),
     /// The sender answered a reconfiguration with a new stream.
-    Restarted(Start),
-    Closed(String),
+    Restarted(u64, Start),
+    /// The connection of generation `gen` ended.
+    Closed(u64, String),
 }
 
 fn describe_start(s: &Start) -> String {
@@ -245,17 +250,35 @@ fn describe_start(s: &Start) -> String {
     )
 }
 
+const OSD_SHOW: Duration = Duration::from_secs(5);
+const RECONNECT_EVERY: Duration = Duration::from_secs(2);
+const STATS_EVERY: Duration = Duration::from_secs(1);
+
+/// The window and renderer live for the whole run; connections come and go underneath them.
 struct Running {
     window: Arc<Window>,
     renderer: Renderer,
-    control: Arc<Control>,
+    uploader: render::Uploader,
+    proxy: EventLoopProxy<UserEvent>,
+    addr: SocketAddr,
+    hwaccel: String,
+    threads: i32,
     stats: Arc<Stats>,
-    start: Start,
     next_stats: Instant,
-    /// What we last asked for; F2-F4 edit it and re-send it.
+    /// What we last asked for; F2-F4 edit it and re-send it (and reconnects reuse it).
     hello: Hello,
     /// Refresh rates F4 cycles through (mHz, highest first).
     refresh_choices: Vec<u32>,
+
+    /// Connection generation: events from older connections are ignored.
+    generation: Arc<AtomicU64>,
+    control: Option<Arc<Control>>,
+    start: Option<Start>,
+    /// Stops the receiver (and so the decoder) of the current connection.
+    session_stop: Arc<AtomicBool>,
+    connect_error: Option<String>,
+    connect_attempts: u32,
+
     /// Status panel: shown while pinned (F1), until `osd_until`, or while a switch is pending.
     osd_pinned: bool,
     osd_until: Option<Instant>,
@@ -263,9 +286,92 @@ struct Running {
     summary: stats::Summary,
 }
 
-const OSD_SHOW: Duration = Duration::from_secs(5);
-
 impl Running {
+    /// Starts (re)connecting in the background until it succeeds or a newer attempt replaces it.
+    fn connect(&mut self) {
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let (proxy, addr, hello, current) = (
+            self.proxy.clone(),
+            self.addr,
+            self.hello,
+            self.generation.clone(),
+        );
+        self.connect_attempts = 0;
+        let spawned = thread::Builder::new()
+            .name("connect".into())
+            .spawn(move || {
+                while current.load(Ordering::SeqCst) == generation {
+                    let (restart_proxy, close_proxy) = (proxy.clone(), proxy.clone());
+                    match Control::connect(
+                        addr,
+                        &hello,
+                        move |s| {
+                            let _ = restart_proxy.send_event(UserEvent::Restarted(generation, s));
+                        },
+                        move |reason| {
+                            let _ = close_proxy.send_event(UserEvent::Closed(generation, reason));
+                        },
+                    ) {
+                        Ok((control, start)) => {
+                            let _ =
+                                proxy.send_event(UserEvent::Connected(generation, control, start));
+                            return;
+                        }
+                        Err(e) => {
+                            if proxy
+                                .send_event(UserEvent::ConnectFailed(generation, format!("{e:#}")))
+                                .is_err()
+                            {
+                                return; // event loop gone
+                            }
+                            thread::sleep(RECONNECT_EVERY);
+                        }
+                    }
+                }
+            });
+        if let Err(e) = spawned {
+            eprintln!("cannot start connector: {e}");
+        }
+        self.update_osd();
+    }
+
+    /// Spawns the receiver and decoder for a fresh connection.
+    fn begin_session(&mut self, control: Arc<Control>, start: Start) -> Result<()> {
+        self.session_stop.store(true, Ordering::Relaxed);
+        self.session_stop = Arc::new(AtomicBool::new(false));
+        // When a stalled frame is finally repaired, every frame queued behind it is released at once;
+        // decoding them (~6 ms each) catches up faster than resyncing on a large keyframe over Wi-Fi.
+        let (tx, rx) = sync_channel(64);
+        receiver::spawn(
+            self.addr,
+            control.clone(),
+            self.stats.clone(),
+            tx,
+            self.session_stop.clone(),
+        )?;
+        spawn_decoder(
+            rx,
+            self.hwaccel.clone(),
+            self.threads,
+            &start,
+            control.clone(),
+            self.uploader.clone(),
+            self.stats.clone(),
+            self.proxy.clone(),
+        )?;
+        self.control = Some(control);
+        self.start = Some(start);
+        self.connect_error = None;
+        Ok(())
+    }
+
+    fn end_session(&mut self) {
+        self.session_stop.store(true, Ordering::Relaxed);
+        if let Some(c) = self.control.take() {
+            c.shutdown();
+        }
+    }
+
     fn reconfigure(&mut self, what: &str) {
         println!(
             "requesting {what}: {}x{}{} @ {:.0} Hz, {} {}-bit",
@@ -280,8 +386,14 @@ impl Running {
             },
             if self.hello.bit_depth == 10 { 10 } else { 8 }
         );
-        self.control.reconfigure(&self.hello);
-        self.switching = true;
+        match &self.control {
+            Some(c) => {
+                c.reconfigure(&self.hello);
+                self.switching = true;
+            }
+            // Not connected: the next connection attempt uses the new settings.
+            None => self.connect(),
+        }
         self.flash_osd();
     }
 
@@ -291,13 +403,38 @@ impl Running {
     }
 
     fn osd_visible(&self) -> bool {
-        self.osd_pinned || self.switching || self.osd_until.is_some_and(|t| Instant::now() < t)
+        self.osd_pinned
+            || self.switching
+            || self.control.is_none()
+            || self.osd_until.is_some_and(|t| Instant::now() < t)
     }
 
     /// Re-renders (or hides) the status panel and redraws so it shows even on a static screen.
     fn update_osd(&mut self) {
-        let lines = if self.osd_visible() {
-            let s = &self.start;
+        let keys = format!(
+            "F1 {}  F2 BIT DEPTH  F3 CHROMA  F4 REFRESH  F11 FULLSCREEN",
+            if self.osd_pinned { "HIDE" } else { "PIN" }
+        );
+        let lines = if !self.osd_visible() {
+            vec![]
+        } else if self.control.is_none() {
+            let mut l = vec![format!(
+                "{} {}...   ATTEMPT {}",
+                if self.start.is_some() {
+                    "RECONNECTING TO"
+                } else {
+                    "CONNECTING TO"
+                },
+                self.addr,
+                self.connect_attempts.max(1)
+            )];
+            if let Some(e) = &self.connect_error {
+                l.push(e.chars().take(90).collect());
+            }
+            l.push(keys);
+            l
+        } else {
+            let s = self.start.as_ref().unwrap();
             let ms = |v: Option<f64>| v.map_or("-".to_string(), |v| format!("{v:.1}MS"));
             vec![
                 format!(
@@ -326,13 +463,8 @@ impl Running {
                         String::new()
                     }
                 ),
-                format!(
-                    "F1 {}  F2 BIT DEPTH  F3 CHROMA  F4 REFRESH  F11 FULLSCREEN",
-                    if self.osd_pinned { "HIDE" } else { "PIN" }
-                ),
+                keys,
             ]
-        } else {
-            vec![]
         };
         let scale = (3.0 * self.window.scale_factor()).round() as usize;
         self.renderer.set_osd(lines, scale);
@@ -340,15 +472,91 @@ impl Running {
     }
 }
 
+/// Decode thread for one connection; ends when the receiver drops its sender.
+#[allow(clippy::too_many_arguments)]
+fn spawn_decoder(
+    rx: std::sync::mpsc::Receiver<receiver::EncodedFrame>,
+    hwaccel: String,
+    threads: i32,
+    start: &Start,
+    control: Arc<Control>,
+    uploader: render::Uploader,
+    stats: Arc<Stats>,
+    proxy: EventLoopProxy<UserEvent>,
+) -> Result<()> {
+    // A fresh decoder per stream format: FFmpeg 6.1 crashes when a running VA-API decoder falls
+    // back to software mid-stream (4:2:0 -> 4:4:4 on AMD), and 4:4:4 never decodes on VA-API
+    // anyway, so open it in software directly.
+    let open_for = move |s: &Start| {
+        let hw = if s.chroma444 && hwaccel == "auto" {
+            "none"
+        } else {
+            hwaccel.as_str()
+        };
+        Decoder::open(hw, threads)
+    };
+    let mut decoder = open_for(start)?;
+    let mut decoder_session = start.session_id;
+    thread::Builder::new()
+        .name("decode".into())
+        .spawn(move || {
+            // Last line of defence for the reference chain: never hand the decoder a picture whose
+            // predecessor it has not seen. Mesa's VA-API driver segfaults on missing references (seen
+            // on RX 9070 XT / Mesa 25.2.8), so after any gap or decode error everything is dropped
+            // until the next keyframe.
+            let mut expected: Option<u32> = None;
+            let mut last_request = Instant::now() - Duration::from_secs(1);
+            for frame in rx {
+                if frame.session != decoder_session {
+                    let start = *control.current.lock().unwrap();
+                    match open_for(&start) {
+                        Ok(d) => decoder = d,
+                        Err(e) => eprintln!("{e:#}"),
+                    }
+                    decoder_session = frame.session;
+                    expected = None;
+                }
+                let in_sequence = frame.keyframe || expected == Some(frame.frame_id);
+                if !in_sequence {
+                    if let Some(e) = expected.take() {
+                        eprintln!(
+                            "decoder: expected frame {e} but got {}; dropping until a keyframe",
+                            frame.frame_id
+                        );
+                    }
+                    if last_request.elapsed() >= Duration::from_millis(250) {
+                        control.request_keyframe();
+                        last_request = Instant::now();
+                    }
+                    continue;
+                }
+                expected = Some(frame.frame_id.wrapping_add(1));
+                let t0 = Instant::now();
+                match decoder.decode(&frame.data) {
+                    Ok(Some(pic)) => {
+                        uploader.upload(&pic, frame.capture_us);
+                        stats.frame_decoded(t0.elapsed().as_micros() as u32, &decoder.describe());
+                        let _ = proxy.send_event(UserEvent::FrameReady);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("{e:#}; dropping until a keyframe");
+                        expected = None;
+                        control.request_keyframe();
+                        last_request = Instant::now();
+                    }
+                }
+            }
+        })?;
+    Ok(())
+}
+
 struct App {
     args: Args,
     proxy: EventLoopProxy<UserEvent>,
-    stop: Arc<AtomicBool>,
     running: Option<Running>,
     failed: bool,
 }
-
-const STATS_EVERY: Duration = Duration::from_secs(1);
 
 impl App {
     fn launch(&mut self, el: &ActiveEventLoop) -> Result<Running> {
@@ -375,7 +583,7 @@ impl App {
         let (hello, max_refresh) = self.args.hello(monitor.as_ref());
         let addr = self.args.server_addr()?;
         println!(
-            "connecting to {addr}: requesting {}",
+            "sender {addr}: requesting {}",
             if hello.width == 0 {
                 "the sender's current mode".to_string()
             } else {
@@ -389,130 +597,56 @@ impl App {
                 )
             }
         );
-        let proxy = self.proxy.clone();
-        let restart_proxy = self.proxy.clone();
-        let (control, start) = Control::connect(
-            addr,
-            &hello,
-            move |s| {
-                let _ = restart_proxy.send_event(UserEvent::Restarted(s));
-            },
-            move |reason| {
-                let _ = proxy.send_event(UserEvent::Closed(reason));
-            },
-        )?;
-        println!("stream: {}", describe_start(&start));
 
         let mut attrs = Window::default_attributes().with_title("vdview");
         if self.args.windowed {
+            let (pw, ph) = if hello.width == 0 {
+                (1280, 720)
+            } else {
+                let k = if hello.hidpi { 2 } else { 1 };
+                (hello.width as u32 * k, hello.height as u32 * k)
+            };
             let scale = monitor.as_ref().map_or(1.0, |m| m.scale_factor());
             attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(
-                start.pixel_width as f64 / scale,
-                start.pixel_height as f64 / scale,
+                pw as f64 / scale,
+                ph as f64 / scale,
             ));
         } else {
             attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(monitor.clone())));
         }
         let window = Arc::new(el.create_window(attrs)?);
         window.set_cursor_visible(self.args.windowed); // the Mac's cursor is part of the picture
-
         let (renderer, uploader) = Renderer::new(window.clone(), self.args.vsync)?;
-        let stats = Arc::new(Stats::default());
-        // When a stalled frame is finally repaired, every frame queued behind it is released at once;
-        // decoding them (~6 ms each) catches up faster than resyncing on a large keyframe over Wi-Fi.
-        let (tx, rx) = sync_channel(64);
-        receiver::spawn(addr, control.clone(), stats.clone(), tx, self.stop.clone())?;
-
-        // A fresh decoder per stream format: FFmpeg 6.1 crashes when a running VA-API decoder falls
-        // back to software mid-stream (4:2:0 -> 4:4:4 on AMD), and 4:4:4 never decodes on VA-API
-        // anyway, so open it in software directly.
-        let (hwaccel, threads) = (self.args.hwaccel.clone(), self.args.threads);
-        let open_for = move |s: &Start| {
-            let hw = if s.chroma444 && hwaccel == "auto" {
-                "none"
-            } else {
-                hwaccel.as_str()
-            };
-            Decoder::open(hw, threads)
-        };
-        let mut decoder = open_for(&start)?;
-        let mut decoder_session = start.session_id;
-        let (proxy, dstats, dcontrol) = (self.proxy.clone(), stats.clone(), control.clone());
-        thread::Builder::new()
-            .name("decode".into())
-            .spawn(move || {
-                // Last line of defence for the reference chain: never hand the decoder a picture
-                // whose predecessor it has not seen. Mesa's VA-API driver segfaults on missing
-                // references (seen on RX 9070 XT / Mesa 25.2.8), so after any gap or decode
-                // error everything is dropped until the next keyframe.
-                let mut expected: Option<u32> = None;
-                let mut last_request = Instant::now() - Duration::from_secs(1);
-                for frame in rx {
-                    if frame.session != decoder_session {
-                        let start = *dcontrol.current.lock().unwrap();
-                        match open_for(&start) {
-                            Ok(d) => decoder = d,
-                            Err(e) => eprintln!("{e:#}"),
-                        }
-                        decoder_session = frame.session;
-                        expected = None;
-                    }
-                    let in_sequence = frame.keyframe || expected == Some(frame.frame_id);
-                    if !in_sequence {
-                        if expected.is_some() {
-                            eprintln!(
-                                "decoder: expected frame {} but got {}; dropping until a keyframe",
-                                expected.unwrap(),
-                                frame.frame_id
-                            );
-                            expected = None;
-                        }
-                        if last_request.elapsed() >= Duration::from_millis(250) {
-                            dcontrol.request_keyframe();
-                            last_request = Instant::now();
-                        }
-                        continue;
-                    }
-                    expected = Some(frame.frame_id.wrapping_add(1));
-                    let t0 = Instant::now();
-                    match decoder.decode(&frame.data) {
-                        Ok(Some(pic)) => {
-                            uploader.upload(&pic, frame.capture_us);
-                            dstats.frame_decoded(
-                                t0.elapsed().as_micros() as u32,
-                                &decoder.describe(),
-                            );
-                            let _ = proxy.send_event(UserEvent::FrameReady);
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            eprintln!("{e:#}; dropping until a keyframe");
-                            expected = None;
-                            dcontrol.request_keyframe();
-                            last_request = Instant::now();
-                        }
-                    }
-                }
-            })?;
 
         let mut refresh_choices = vec![max_refresh, 120_000, 60_000, hello.refresh_mhz];
         refresh_choices.retain(|&r| r <= max_refresh);
         refresh_choices.sort_unstable_by(|a, b| b.cmp(a));
         refresh_choices.dedup();
-        Ok(Running {
+        let mut r = Running {
             window,
             renderer,
-            control,
-            stats,
-            start,
+            uploader,
+            proxy: self.proxy.clone(),
+            addr,
+            hwaccel: self.args.hwaccel.clone(),
+            threads: self.args.threads,
+            stats: Arc::new(Stats::default()),
             next_stats: Instant::now() + STATS_EVERY,
             hello,
             refresh_choices,
+            generation: Arc::new(AtomicU64::new(0)),
+            control: None,
+            start: None,
+            session_stop: Arc::new(AtomicBool::new(false)),
+            connect_error: None,
+            connect_attempts: 0,
             osd_pinned: false,
             osd_until: Some(Instant::now() + OSD_SHOW),
             switching: false,
             summary: Default::default(),
-        })
+        };
+        r.connect();
+        Ok(r)
     }
 }
 
@@ -544,9 +678,11 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::RedrawRequested => {
                 if let Some(capture_us) = r.renderer.render() {
                     r.stats.frame_presented();
-                    let clock = r.control.clock.lock().unwrap();
-                    if let Some(local) = clock.server_to_client(capture_us) {
-                        r.stats.latency(now_us().saturating_sub(local) as u32);
+                    if let Some(c) = &r.control {
+                        let clock = c.clock.lock().unwrap();
+                        if let Some(local) = clock.server_to_client(capture_us) {
+                            r.stats.latency(now_us().saturating_sub(local) as u32);
+                        }
                     }
                 }
             }
@@ -607,25 +743,46 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, _el: &ActiveEventLoop, event: UserEvent) {
+        let Some(r) = self.running.as_mut() else {
+            return;
+        };
+        let current = r.generation.load(Ordering::SeqCst);
         match event {
-            UserEvent::FrameReady => {
-                if let Some(r) = &self.running {
-                    r.window.request_redraw();
+            UserEvent::FrameReady => r.window.request_redraw(),
+            UserEvent::Connected(g, control, start) if g == current => {
+                println!("connected; stream: {}", describe_start(&start));
+                if let Err(e) = r.begin_session(control.clone(), start) {
+                    eprintln!("cannot start session: {e:#}");
+                    control.shutdown();
+                    r.connect();
+                    return;
                 }
+                r.switching = false;
+                r.flash_osd();
             }
-            UserEvent::Restarted(start) => {
+            UserEvent::Connected(_, control, _) => control.shutdown(), // superseded attempt
+            UserEvent::ConnectFailed(g, reason) if g == current => {
+                r.connect_attempts += 1;
+                if r.connect_attempts == 1 || r.connect_attempts % 15 == 0 {
+                    eprintln!("connect failed (attempt {}): {reason}", r.connect_attempts);
+                }
+                r.connect_error = Some(reason);
+                r.update_osd();
+            }
+            UserEvent::Restarted(g, start) if g == current => {
                 println!("stream: {}", describe_start(&start));
-                if let Some(r) = self.running.as_mut() {
-                    r.start = start;
-                    r.switching = false;
-                    r.flash_osd();
-                }
+                r.start = Some(start);
+                r.switching = false;
+                r.flash_osd();
             }
-            UserEvent::Closed(reason) => {
-                eprintln!("sender closed the session: {reason}");
-                el.exit();
+            UserEvent::Closed(g, reason) if g == current => {
+                eprintln!("connection lost: {reason}; reconnecting");
+                r.end_session();
+                r.switching = false;
+                r.connect();
             }
+            _ => {} // events from an older connection
         }
     }
 
@@ -635,11 +792,19 @@ impl ApplicationHandler<UserEvent> for App {
         };
         let now = Instant::now();
         if now >= r.next_stats {
-            let rtt = r.control.clock.lock().unwrap().rtt_us();
+            let rtt = r
+                .control
+                .as_ref()
+                .and_then(|c| c.clock.lock().unwrap().rtt_us());
             let (line, summary) = r.stats.drain(STATS_EVERY.as_secs_f64(), rtt);
-            println!("{line}");
-            r.window
-                .set_title(&format!("vdview {} | {line}", describe_start(&r.start)));
+            if r.control.is_some() {
+                println!("{line}");
+                let title = format!(
+                    "vdview {} | {line}",
+                    r.start.as_ref().map_or(String::new(), describe_start)
+                );
+                r.window.set_title(&title);
+            }
             r.summary = summary;
             r.next_stats = now + STATS_EVERY;
             r.update_osd();
@@ -653,7 +818,10 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
-        self.stop.store(true, Ordering::Relaxed);
+        if let Some(r) = self.running.as_mut() {
+            r.generation.fetch_add(1, Ordering::SeqCst); // stop any connector
+            r.end_session();
+        }
     }
 }
 
@@ -809,7 +977,6 @@ fn main() -> ExitCode {
     let mut app = App {
         args,
         proxy: event_loop.create_proxy(),
-        stop: Arc::new(AtomicBool::new(false)),
         running: None,
         failed: false,
     };

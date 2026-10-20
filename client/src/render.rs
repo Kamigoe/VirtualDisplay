@@ -41,6 +41,7 @@ struct Common {
     shared: Mutex<Shared>,
 }
 
+#[derive(Clone)]
 pub struct Uploader(Arc<Common>);
 
 pub struct Renderer {

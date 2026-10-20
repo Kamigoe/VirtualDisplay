@@ -1,11 +1,11 @@
 //! TCP control channel: Hello/Start handshake, keyframe requests, and Ping/Pong clock sync.
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
@@ -19,6 +19,8 @@ pub struct Control {
     pub session: Arc<AtomicU32>,
     /// Start message of the current session (format of the stream).
     pub current: Arc<Mutex<Start>>,
+    /// When the last Pong arrived; the receiver declares the link dead if this gets stale.
+    pub last_pong: Arc<Mutex<Instant>>,
 }
 
 impl Control {
@@ -57,11 +59,13 @@ impl Control {
             clock: Arc::new(Mutex::new(ClockSync::default())),
             session: Arc::new(AtomicU32::new(start.session_id)),
             current: Arc::new(Mutex::new(start)),
+            last_pong: Arc::new(Mutex::new(Instant::now())),
         });
 
         let clock = control.clock.clone();
         let session = control.session.clone();
         let current = control.current.clone();
+        let last_pong = control.last_pong.clone();
         thread::Builder::new()
             .name("control-rx".into())
             .spawn(move || {
@@ -71,6 +75,7 @@ impl Control {
                             let mut r = protocol::Reader(&body);
                             if let (Ok(sent), Ok(server)) = (r.u64(), r.u64()) {
                                 clock.lock().unwrap().add_sample(sent, server, now_us());
+                                *last_pong.lock().unwrap() = Instant::now();
                             }
                         }
                         Ok((protocol::MSG_START, body)) => match Start::decode(&body) {
@@ -97,6 +102,11 @@ impl Control {
     /// Asks for a different mode/format on the running connection; answered by a new Start.
     pub fn reconfigure(&self, hello: &Hello) {
         self.send(protocol::MSG_HELLO, &hello.encode());
+    }
+
+    /// Closes the connection (the reader thread then reports it as closed).
+    pub fn shutdown(&self) {
+        let _ = self.writer.lock().unwrap().shutdown(Shutdown::Both);
     }
 
     pub fn request_keyframe(&self) {

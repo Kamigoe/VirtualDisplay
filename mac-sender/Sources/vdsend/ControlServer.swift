@@ -11,6 +11,12 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
     // Queue-confined.
     private var client: NWConnection?
     private var lastKeyframeRequest: UInt64 = 0
+    /// server_us of the last control message from the viewer (it pings every 500 ms).
+    private var lastHeard: UInt64 = 0
+    private var watchdog: DispatchSourceTimer?
+
+    /// A viewer that vanished without closing (Wi-Fi drop) is dropped after this long.
+    private static let viewerTimeout: UInt64 = 6_000_000 // µs
 
     private static let viewerID = "udp"
     private static let keyframeRequestInterval: UInt64 = 100_000 // µs
@@ -35,6 +41,12 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
         }
         listener.newConnectionHandler = { [weak self] c in self?.accept(c) }
         listener.start(queue: queue)
+
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + 2, repeating: 2)
+        t.setEventHandler { [weak self] in self?.checkViewer() }
+        t.resume()
+        watchdog = t
     }
 
     // MARK: - connection lifecycle (queue-confined)
@@ -46,6 +58,7 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
             video.endSession()
         }
         client = c
+        lastHeard = serverMicrosNow()
         c.stateUpdateHandler = { [weak self, weak c] state in
             guard let self, let c else { return }
             switch state {
@@ -88,8 +101,15 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
         }
     }
 
+    private func checkViewer() {
+        guard let c = client, serverMicrosNow() &- lastHeard > Self.viewerTimeout else { return }
+        log("viewer \(c.endpoint) silent for \(Self.viewerTimeout / 1_000_000)s; dropping it")
+        c.cancel()
+    }
+
     private func handle(_ msg: Data, from c: NWConnection) {
         guard client === c else { return }
+        lastHeard = serverMicrosNow()
         var r = ByteReader(msg)
         guard let t = r.u8(), let type = Proto.Control(rawValue: t) else {
             log("control: unknown message type")

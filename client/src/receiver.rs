@@ -77,6 +77,7 @@ const KEYFRAME_RETRY: Duration = Duration::from_millis(250);
 const KEEPALIVE_EVERY: Duration = Duration::from_secs(1);
 const PING_EVERY: Duration = Duration::from_millis(500);
 const RECV_BUFFER: usize = 8 << 20;
+const LINK_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub fn spawn(
     server: SocketAddr,
@@ -172,6 +173,16 @@ impl Receiver {
                     self.retry_after =
                         Duration::from_micros(2 * rtt + 3000).max(Duration::from_millis(8));
                 }
+            }
+            // A vanished sender (Wi-Fi drop) often leaves the TCP connection silently open; pings go
+            // out every 500 ms, so 3 s without a Pong means the link is dead.
+            if self.control.last_pong.lock().unwrap().elapsed() > LINK_TIMEOUT {
+                eprintln!(
+                    "no reply from the sender for {}s; dropping the connection",
+                    LINK_TIMEOUT.as_secs()
+                );
+                self.control.shutdown();
+                return;
             }
             match self.socket.recv(&mut buf) {
                 Ok(n) => self.on_datagram(&buf[..n]),
