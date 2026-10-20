@@ -57,7 +57,12 @@ impl ClockSync {
     }
 
     /// Converts a sender timestamp to the viewer clock.
+    /// None until a few samples exist: a lone early sample (taken while the stream starts up) can
+    /// be off by hundreds of ms.
     pub fn server_to_client(&self, server_us: u64) -> Option<u64> {
+        if self.samples.len() < 5 {
+            return None;
+        }
         let s = self.best()?;
         Some((server_us as i64 - s.offset_us).max(0) as u64)
     }

@@ -78,6 +78,9 @@ const MAX_NACK_ROUNDS: u32 = 4;
 const KEYFRAME_RETRY: Duration = Duration::from_millis(250);
 const KEEPALIVE_EVERY: Duration = Duration::from_secs(1);
 const PING_EVERY: Duration = Duration::from_millis(500);
+/// Ping faster right after connecting so the clock offset (latency figures) settles quickly.
+const PING_EVERY_WARMUP: Duration = Duration::from_millis(100);
+const WARMUP: Duration = Duration::from_secs(3);
 const RECV_BUFFER: usize = 8 << 20;
 const LINK_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -152,6 +155,7 @@ impl Receiver {
         let mut buf = [0u8; 2048];
         let mut last_keepalive: Option<Instant> = None;
         let mut last_ping: Option<Instant> = None;
+        let started = Instant::now();
         while !stop.load(Ordering::Relaxed) {
             let now = Instant::now();
             let current = self.control.session.load(Ordering::Relaxed);
@@ -168,7 +172,8 @@ impl Receiver {
                 let _ = self.socket.send(&protocol::keepalive(self.session_id));
                 last_keepalive = Some(now);
             }
-            if last_ping.is_none_or(|t| now - t >= PING_EVERY) {
+            let ping_every = if now - started < WARMUP { PING_EVERY_WARMUP } else { PING_EVERY };
+            if last_ping.is_none_or(|t| now - t >= ping_every) {
                 self.control.ping();
                 last_ping = Some(now);
                 if let Some(rtt) = self.control.clock.lock().unwrap().min_rtt_us() {
