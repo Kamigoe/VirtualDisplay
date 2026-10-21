@@ -1,0 +1,43 @@
+#!/bin/bash
+# Unlocks the Mac's FileVault after a restart, using macOS 26's pre-boot SSH (password only).
+# Waits for the Mac to appear on the network (looking it up by hardware address if its IP
+# changed), then connects; type the Mac login password when asked.
+MAC_IP="${VD_MAC_IP:-192.168.11.18}"
+MAC_HW="${VD_MAC_HW:-50:ed:3c:1f:f5:93}"
+MAC_USER="${VD_MAC_USER:-akira}"
+PREFIX="${MAC_IP%.*}"
+
+port_open() { timeout 2 bash -c "echo > /dev/tcp/$1/22" 2>/dev/null; }
+
+find_by_hw() {
+    for n in $(seq 1 254); do ping -c 1 -W 1 "$PREFIX.$n" >/dev/null 2>&1 & done
+    wait
+    ip neigh | awk -v hw="$MAC_HW" 'tolower($5) == hw { print $1; exit }'
+}
+
+echo "Waiting for the Mac ($MAC_IP / $MAC_HW) to come up... (Ctrl-C to stop)"
+for i in $(seq 1 120); do
+    if port_open "$MAC_IP"; then break; fi
+    if [ $((i % 10)) -eq 0 ]; then
+        found=$(find_by_hw)
+        if [ -n "$found" ] && [ "$found" != "$MAC_IP" ]; then
+            echo "Mac found at $found"
+            MAC_IP="$found"
+        fi
+    fi
+    sleep 2
+done
+if ! port_open "$MAC_IP"; then
+    echo "The Mac did not show up. Fall back to typing the password on the Mac's own keyboard."
+    read -r -p "Press Enter to close." _
+    exit 1
+fi
+
+echo "Connecting to $MAC_USER@$MAC_IP — enter the Mac login password to unlock FileVault."
+# The pre-boot environment has its own host key; keep it apart from the normal one.
+ssh -o UserKnownHostsFile="$HOME/.ssh/known_hosts_mac_preboot" -o StrictHostKeyChecking=accept-new \
+    -o PubkeyAuthentication=no -o PreferredAuthentications=keyboard-interactive,password \
+    "$MAC_USER@$MAC_IP"
+echo
+echo "Done. The Mac should finish booting; 'Mac (VirtualDisplay)' reconnects by itself once vdsend starts."
+read -r -p "Press Enter to close." _

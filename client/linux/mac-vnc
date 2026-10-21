@@ -1,0 +1,4 @@
+#!/bin/sh
+# Opens the Mac's built-in Screen Sharing (VNC) in Remmina, e.g. to log in when the Mac stops at
+# the login window after a restart (the virtual display only exists once vdsend runs).
+exec remmina -c "vnc://${VD_MAC_USER:-akira}@${VD_MAC_IP:-192.168.11.18}"

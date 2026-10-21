@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Mac Screen Sharing (VNC)
+Comment=Open the Mac's built-in Screen Sharing in Remmina
+Exec=sh -c '"$HOME/.local/bin/mac-vnc"'
+Icon=preferences-desktop-remote-desktop
+Terminal=false
+Categories=Utility;

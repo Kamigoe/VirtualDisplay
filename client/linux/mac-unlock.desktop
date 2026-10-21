@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Mac Unlock after Restart (VirtualDisplay)
+Comment=Unlock the Mac's FileVault over SSH after a restart
+Exec=sh -c '"$HOME/.local/bin/mac-unlock"'
+Icon=changes-allow
+Terminal=true
+Categories=Utility;
