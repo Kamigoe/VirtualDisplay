@@ -39,5 +39,18 @@ ssh -o UserKnownHostsFile="$HOME/.ssh/known_hosts_mac_preboot" -o StrictHostKeyC
     -o PubkeyAuthentication=no -o PreferredAuthentications=keyboard-interactive,password \
     "$MAC_USER@$MAC_IP"
 echo
-echo "Done. The Mac should finish booting; 'Mac (VirtualDisplay)' reconnects by itself once vdsend starts."
+# Unlocking over SSH does not log in to the desktop (typing the password on the Mac does), so the
+# Mac stops at the login window. Open Screen Sharing for that as soon as it is available.
+echo "Unlocked. Waiting for the login window's Screen Sharing (VNC)..."
+for i in $(seq 1 90); do
+    if timeout 2 bash -c "echo > /dev/tcp/$MAC_IP/5900" 2>/dev/null; then
+        echo "Log in to the Mac in the Remmina window, then close it."
+        echo "'Mac (VirtualDisplay)' reconnects by itself once you are logged in."
+        VD_MAC_IP="$MAC_IP" "$HOME/.local/bin/mac-vnc" >/dev/null 2>&1 &
+        sleep 3
+        exit 0
+    fi
+    sleep 2
+done
+echo "Screen Sharing did not come up; type the password on the Mac's keyboard to log in."
 read -r -p "Press Enter to close." _
