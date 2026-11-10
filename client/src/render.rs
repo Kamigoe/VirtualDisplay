@@ -90,10 +90,20 @@ fn params_bytes(scale: [f32; 2], v: &VideoTextures, srgb_out: bool, dither: bool
     out
 }
 
+/// wgpu instance options; `WGPU_BACKEND` (e.g. `vulkan`) overrides the backend.
+/// On Windows, default to DX12: wgpu would otherwise pick Vulkan, whose swapchain on AMD offers
+/// only Immediate (tearing), while DX12 gives Mailbox and a shorter present step.
+fn instance_descriptor() -> wgpu::InstanceDescriptor {
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    if cfg!(windows) {
+        desc.backends = wgpu::Backends::DX12;
+    }
+    desc.with_env()
+}
+
 impl Renderer {
     pub fn new(window: Arc<Window>, vsync: bool) -> Result<(Renderer, Uploader)> {
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let instance = wgpu::Instance::new(instance_descriptor());
         let surface = instance
             .create_surface(window.clone())
             .context("creating surface")?;
@@ -524,8 +534,7 @@ fn create_plane(
 /// Renders one picture offscreen and returns tightly packed RGBA8 pixels. Used by `--snapshot`
 /// to check decoding and colour conversion on machines without a usable display.
 pub fn snapshot(pic: &Picture) -> Result<Vec<u8>> {
-    let instance =
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let instance = wgpu::Instance::new(instance_descriptor());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default()))
         .context("no GPU adapter")?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {

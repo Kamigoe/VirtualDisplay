@@ -1,12 +1,14 @@
 //! Builds the small C decoder shim and links it against the system FFmpeg (libavcodec + libavutil).
 //!
 //! FFmpeg is located via, in order:
-//!   1. `FFMPEG_DIR` (expects `include/` and `lib/`; the usual way on Windows)
+//!   1. `FFMPEG_DIR` (expects `include/` and `lib/`; the usual way on Windows, where the DLLs in
+//!      `bin/` are also copied next to the executable)
 //!   2. `pkg-config` (Linux)
 //!   3. Homebrew's default prefix (macOS)
 
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
@@ -27,6 +29,9 @@ fn main() {
         );
         for l in libs {
             println!("cargo:rustc-link-lib={l}");
+        }
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+            copy_dlls(&dir.join("bin"));
         }
     } else if let Some((includes, search, names)) = pkg_config(&["libavcodec", "libavutil"]) {
         for i in includes {
@@ -53,6 +58,41 @@ fn main() {
     }
 
     build.compile("vd_decoder");
+}
+
+/// Copies FFmpeg's DLLs next to the executable (`target\<profile>\`), so `vdview.exe` runs without
+/// FFmpeg on PATH. A DLL that is in use (vdview still running) is left as it is.
+fn copy_dlls(bin: &Path) {
+    let Ok(entries) = fs::read_dir(bin) else {
+        println!(
+            "cargo:warning=no {} — copy FFmpeg's DLLs next to vdview.exe yourself",
+            bin.display()
+        );
+        return;
+    };
+    // OUT_DIR is target\<profile>\build\vdview-<hash>\out.
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let Some(dest) = out.ancestors().nth(3) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let src = e.path();
+        if !src
+            .extension()
+            .is_some_and(|x| x.eq_ignore_ascii_case("dll"))
+        {
+            continue;
+        }
+        let to = dest.join(e.file_name());
+        let same = match (fs::metadata(&src), fs::metadata(&to)) {
+            (Ok(a), Ok(b)) => a.len() == b.len() && a.modified().ok() == b.modified().ok(),
+            _ => false,
+        };
+        if !same && let Err(err) = fs::copy(&src, &to) {
+            println!("cargo:warning=could not copy {}: {err}", src.display());
+        }
+    }
+    println!("cargo:rerun-if-changed={}", bin.display());
 }
 
 /// Returns (include dirs, link search dirs, lib names) from `pkg-config`, if available.

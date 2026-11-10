@@ -114,6 +114,7 @@ pub fn spawn(
     socket.bind(&bind.into())?;
     let socket: UdpSocket = socket.into();
     socket.connect(server)?; // only accept datagrams from the sender
+    fine_timer();
     socket.set_read_timeout(Some(TICK))?;
 
     let mut rx = Receiver {
@@ -133,6 +134,26 @@ pub fn spawn(
         .name("udp-rx".into())
         .spawn(move || rx.run(&stop))?)
 }
+
+/// Windows wakes timed waits on a ~15.6 ms timer by default, which would turn the 2 ms `TICK`
+/// (and the Nack timers driven by it) into 16 ms. Ask for 1 ms for the life of the process.
+#[cfg(windows)]
+fn fine_timer() {
+    #[link(name = "winmm")]
+    unsafe extern "system" {
+        fn timeBeginPeriod(period_ms: u32) -> u32;
+    }
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    // SAFETY: plain Win32 call with no pointers; 0 (TIMERR_NOERROR) on success.
+    ONCE.call_once(|| {
+        if unsafe { timeBeginPeriod(1) } != 0 {
+            eprintln!("warning: timeBeginPeriod(1) failed; timers stay at ~15.6 ms");
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn fine_timer() {}
 
 struct Receiver {
     socket: UdpSocket,

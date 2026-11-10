@@ -71,16 +71,24 @@ Mac の操作には Bluetooth のキーボード / マウスを使う。
 
 **Windows**
 
-1. [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)（C++ ワークロード）と Rust をインストール
-2. FFmpeg の shared ビルドを取得（例：BtbN の `ffmpeg-master-latest-win64-gpl-shared.zip`）し、任意の場所に展開
+1. [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)（「C++ によるデスクトップ開発」）、
+   Rust（rustup、MSVC ツールチェーン）、Git をインストール
+2. FFmpeg の shared ビルド（例：BtbN の `ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip`）を `C:\ffmpeg` に展開
+   （`C:\ffmpeg\include`、`lib`、`bin` ができるように）
 3. ビルド：
    ```powershell
-   $env:FFMPEG_DIR = "C:\ffmpeg"   # include\ と lib\ がある場所
+   $env:FFMPEG_DIR = "C:\ffmpeg"   # include\ と lib\ と bin\ がある場所
    cd client
    cargo build --release
    ```
-4. 実行時に `C:\ffmpeg\bin` の DLL（`avcodec-*.dll`, `avutil-*.dll` など）が必要。
-   PATH に追加するか、`target\release\vdview.exe` と同じフォルダへコピーする。
+   `FFMPEG_DIR\bin` の DLL（`avcodec-*.dll`, `avutil-*.dll` など）はビルド時に `target\release\` へコピーされるので、
+   PATH の設定は不要。
+4. 初回起動時に Windows Defender ファイアウォールの確認が出たら「プライベート ネットワーク」で許可する
+   （映像の UDP を受けるため）。
+
+Windows では起動中だけタイマー分解能を 1ms にする（`timeBeginPeriod(1)`。既定の約 15.6ms だと再送要求が遅れる）。
+描画 API は Windows では DX12（Mailbox：ティアリングなしで低遅延）。wgpu の自動選択だと Vulkan になり、
+AMD では Immediate（ティアリングあり）しか使えないため。`$env:WGPU_BACKEND = "vulkan"` で Vulkan に戻せる。
 
 **Ubuntu**
 
@@ -158,18 +166,20 @@ mac-sender/scripts/install.sh            # 既定の引数: --mode 3440x1440@60 
 
 - `vdview` は接続が切れても終了せず、2 秒ごとに再接続する（左上に RECONNECTING）。Pong が 3 秒途絶えたら切断とみなす。
 - Mac の Wi-Fi 監視（20 秒ごと）：ルーターに約 1 分届かなければ Wi-Fi をオフ→オン。Wi-Fi がオフなら自動でオンに戻す。
-- 調子が悪いだけなら PC から再起動できる：アプリ一覧の「Mac Wi-Fi Restart (VirtualDisplay)」または `mac-wifi-restart`。
-  この操作に使う SSH 鍵（Ubuntu の `~/.ssh/vd_mac`）は、Mac 側でこのコマンド専用に制限してある。
+- 調子が悪いだけなら PC から再起動できる：アプリ一覧（Windows ではスタートメニュー）の
+  「Mac Wi-Fi Restart (VirtualDisplay)」または `mac-wifi-restart`。
+  この操作に使う SSH 鍵（`~/.ssh/vd_mac`）は、Mac 側でこのコマンド専用に制限してある。
 
 ### Mac を再起動したとき（FileVault 有効）
 
 1. **ロック解除**：PC のアプリ一覧「Mac Unlock after Restart」（`mac-unlock`）→ Mac のログインパスワード
    （macOS 26 の起動前 SSH）。Mac がネットワークに現れるまで待ち、IP が変わっていれば MAC アドレスで探す。
-   起動前の SSH は別のホスト鍵を使うことがあるため、`~/.ssh/known_hosts_mac_preboot` に分けて記録する。
+   起動前の SSH は別のホスト鍵を使うことがあるため、`~/.ssh/known_hosts_mac_preboot`（Windows は
+   `%USERPROFILE%\.ssh\known_hosts_mac_preboot`）に分けて記録する。
    予備手段：蓋を開け、本体キーボードでパスワード入力 → Return（ユーザーは 1 人なので入力欄が最初から選択されている）。
 2. **ログイン**：SSH でロック解除した場合はログイン画面で止まる（本体キーボードでの解除と違い、デスクトップへの
-   ログインまではされない。2026-10-22 の試験で確認）。`mac-unlock` が解除後に Remmina（`mac-vnc`）を自動で開くので、
-   そこでログインする。
+   ログインまではされない。2026-10-22 の試験で確認）。`mac-unlock` が解除後に VNC（`mac-vnc`：Ubuntu は Remmina、
+   Windows は TigerVNC Viewer）を自動で開くので、そこでログインする。
    再起動直後は vdsend がまだスリープを止めていないので、蓋は開けておく。
 3. **vdsend**：LaunchAgent が自動起動。PC のアプリはそのまま待っていれば再接続する。
 
@@ -180,6 +190,38 @@ mac-sender/scripts/install.sh            # 既定の引数: --mode 3440x1440@60 
 ```sh
 client/linux/install.sh     # vdview-mac / mac-wifi-restart とアプリ一覧のエントリを入れる
 ```
+
+## PC 側ランチャー（Windows）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File client\windows\install.ps1
+```
+
+スタートメニューの「VirtualDisplay」フォルダーに、Ubuntu と同じ 4 つのショートカットを作る
+（スクリプトはリポジトリ内の `client\windows\*.ps1` をそのまま実行する。リポジトリを移したら再実行）。
+
+| ショートカット | スクリプト | 内容 |
+|---|---|---|
+| Mac (VirtualDisplay) | `vdview-mac.ps1` | `vdview` を起動。ログは `%LOCALAPPDATA%\vdview\vdview.log` |
+| Mac Wi-Fi Restart (VirtualDisplay) | `mac-wifi-restart.ps1` | Mac の Wi-Fi をオフ→オン（結果は通知に出る） |
+| Mac Unlock after Restart (VirtualDisplay) | `mac-unlock.ps1` | 起動前 SSH で FileVault を解除し、VNC を開く |
+| Mac Screen Sharing (VNC) | `mac-vnc.ps1` | Mac の画面共有を TigerVNC Viewer で開く |
+
+接続先などは環境変数で変えられる：`VD_MAC`、`VD_MAC_IP`、`VD_MAC_HW`、`VD_MAC_USER`、
+`VD_VDVIEW`（`vdview.exe` の場所）、`VD_VNCVIEWER`（`vncviewer.exe` の場所）。
+
+準備：
+
+- SSH は Windows 標準の OpenSSH クライアント（`ssh.exe`）を使う。
+- Wi-Fi 再起動用の鍵は Ubuntu のものとは別に作り、Mac 側で Ubuntu の `vd_mac` と同じ制限を付けて登録する：
+  ```powershell
+  ssh-keygen -t ed25519 -f $HOME\.ssh\vd_mac -C vd_mac-windows   # パスフレーズは空のまま Enter
+  ```
+  `$HOME\.ssh\vd_mac.pub` の内容を、Mac の `~/.ssh/authorized_keys` にある既存の `vd_mac` の行と同じオプション
+  （`command=...` など）を付けて 1 行追加する。
+- VNC は [TigerVNC](https://tigervnc.org/) の Viewer を使う。TigerVNC は Apple の認証方式に対応していないため、
+  Mac のシステム設定 > 一般 > 共有 > 画面共有 >（i）で「VNC 使用者が画面を操作することを許可（パスワード）」を
+  オンにしてパスワードを設定しておく。
 
 ## 実測（M1 / macOS 26.5.1）
 
