@@ -14,6 +14,7 @@ Mac に仮想モニターを生やし、その画面を LAN 越しに Windows / 
 | `mac-sender/` | 送信側 `vdsend`（Swift。Apple 純正フレームワークのみ） |
 | `client/` | 受信側 `vdview`（Rust + FFmpeg の小さな C シム + wgpu） |
 | `docs/protocol.md` | 通信プロトコル仕様 |
+| `docs/roadmap.md` | 今後の展望（他モニター対応、入力キャストとの統合、クリップボード等） |
 
 ## クイックスタート
 
