@@ -10,6 +10,7 @@ enum Proto {
         case keyframeRequest = 0x03
         case ping = 0x04
         case pong = 0x05
+        case replaced = 0x06
         case error = 0x7F
     }
 

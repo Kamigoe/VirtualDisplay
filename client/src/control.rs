@@ -12,6 +12,14 @@ use anyhow::{Context, Result, bail};
 use crate::clock::{ClockSync, now_us};
 use crate::protocol::{self, Hello, Start};
 
+/// Why the control connection ended.
+pub enum Closed {
+    /// Error or dropped link; worth reconnecting.
+    Lost(String),
+    /// The sender switched to another viewer (named here); reconnecting would just take it back.
+    Replaced(String),
+}
+
 pub struct Control {
     writer: Mutex<TcpStream>,
     pub clock: Arc<Mutex<ClockSync>>,
@@ -31,7 +39,7 @@ impl Control {
         addr: SocketAddr,
         hello: &Hello,
         on_restart: impl Fn(Start) + Send + 'static,
-        on_closed: impl FnOnce(String) + Send + 'static,
+        on_closed: impl FnOnce(Closed) + Send + 'static,
     ) -> Result<(Arc<Control>, Start)> {
         let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
             .with_context(|| format!("connecting to {addr}"))?;
@@ -87,10 +95,13 @@ impl Control {
                             Err(e) => eprintln!("bad Start: {e:#}"),
                         },
                         Ok((protocol::MSG_ERROR, body)) => {
-                            break String::from_utf8_lossy(&body).into_owned();
+                            break Closed::Lost(String::from_utf8_lossy(&body).into_owned());
+                        }
+                        Ok((protocol::MSG_REPLACED, body)) => {
+                            break Closed::Replaced(String::from_utf8_lossy(&body).into_owned());
                         }
                         Ok(_) => {}
-                        Err(e) => break format!("control connection closed: {e}"),
+                        Err(e) => break Closed::Lost(format!("control connection closed: {e}")),
                     }
                 };
                 on_closed(reason);

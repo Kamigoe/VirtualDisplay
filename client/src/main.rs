@@ -26,7 +26,7 @@ use winit::monitor::MonitorHandle;
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::clock::now_us;
-use crate::control::Control;
+use crate::control::{Closed, Control};
 use crate::decoder::Decoder;
 use crate::protocol::{Hello, Start};
 use crate::render::Renderer;
@@ -244,7 +244,7 @@ enum UserEvent {
     /// The sender answered a reconfiguration with a new stream.
     Restarted(u64, Start),
     /// The connection of generation `gen` ended.
-    Closed(u64, String),
+    Closed(u64, Closed),
 }
 
 fn describe_start(s: &Start) -> String {
@@ -286,6 +286,9 @@ struct Running {
     session_stop: Arc<AtomicBool>,
     connect_error: Option<String>,
     connect_attempts: u32,
+    /// Set when the sender switched to another viewer: no automatic reconnect (two viewers would
+    /// keep taking the sender from each other); Enter reconnects.
+    replaced_by: Option<String>,
 
     /// Status panel: shown while pinned (F1), until `osd_until`, or while a switch is pending.
     osd_pinned: bool,
@@ -400,7 +403,8 @@ impl Running {
                 self.switching = true;
             }
             // Not connected: the next connection attempt uses the new settings.
-            None => self.connect(),
+            None if self.replaced_by.is_none() => self.connect(),
+            None => {} // taken over: wait for Enter
         }
         self.flash_osd();
     }
@@ -425,6 +429,12 @@ impl Running {
         );
         let lines = if !self.osd_visible() {
             vec![]
+        } else if let Some(by) = &self.replaced_by {
+            vec![
+                format!("TAKEN OVER BY ANOTHER VIEWER ({})", by.to_uppercase()),
+                "PRESS ENTER TO RECONNECT (TAKES THE MAC BACK)".to_string(),
+                keys,
+            ]
         } else if self.control.is_none() {
             let mut l = vec![format!(
                 "{} {}...   ATTEMPT {}",
@@ -655,6 +665,7 @@ impl App {
             session_stop: Arc::new(AtomicBool::new(false)),
             connect_error: None,
             connect_attempts: 0,
+            replaced_by: None,
             osd_pinned: false,
             osd_until: Some(Instant::now() + OSD_SHOW),
             switching: false,
@@ -727,6 +738,11 @@ impl ApplicationHandler<UserEvent> for App {
                 Key::Named(NamedKey::Escape) if r.window.fullscreen().is_some() => {
                     r.window.set_fullscreen(None);
                     r.window.set_cursor_visible(true);
+                }
+                Key::Named(NamedKey::Enter) if r.replaced_by.is_some() => {
+                    r.replaced_by = None;
+                    println!("reconnecting (taking the sender back)");
+                    r.connect();
                 }
                 Key::Named(NamedKey::F1) => {
                     r.osd_pinned = !r.osd_pinned;
@@ -820,11 +836,21 @@ impl ApplicationHandler<UserEvent> for App {
                 r.switching = false;
                 r.flash_osd();
             }
-            UserEvent::Closed(g, reason) if g == current => {
+            UserEvent::Closed(g, Closed::Lost(reason)) if g == current => {
                 eprintln!("connection lost: {reason}; reconnecting");
                 r.end_session();
                 r.switching = false;
                 r.connect();
+            }
+            UserEvent::Closed(g, Closed::Replaced(by)) if g == current => {
+                eprintln!("the sender switched to another viewer ({by}); press Enter to reconnect");
+                r.end_session();
+                r.switching = false;
+                r.window.set_title(&format!(
+                    "vdview | taken over by another viewer ({by}) - press Enter to reconnect"
+                ));
+                r.replaced_by = Some(by);
+                r.update_osd();
             }
             _ => {} // events from an older connection
         }

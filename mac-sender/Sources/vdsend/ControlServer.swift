@@ -54,7 +54,13 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
     private func accept(_ c: NWConnection) {
         if let old = client {
             log("replacing viewer \(old.endpoint) with \(c.endpoint)")
-            old.cancel()
+            // Tell it why, so it does not reconnect at once and take the sender back (two viewers
+            // would otherwise keep replacing each other). Viewers that predate this ignore it.
+            send(.replaced, Data("\(c.endpoint)".utf8), to: old)
+            old.send(content: nil, contentContext: .finalMessage, isComplete: true,
+                     completion: .contentProcessed { _ in old.cancel() })
+            // A viewer that vanished never acknowledges; do not keep it around waiting.
+            queue.asyncAfter(deadline: .now() + 1) { old.cancel() }
             video.endSession()
         }
         client = c
