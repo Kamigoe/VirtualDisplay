@@ -41,7 +41,7 @@ usage: vdview <mac-host>[:port] [options]
                         on the CPU on AMD GPUs; 420 allows 10-bit for smoother gradients)
   --bit-depth 8|10      sample bit depth for 4:2:0 (default 10; reduces banding in gradients)
   --refresh HZ|max      refresh rate when matching the monitor (default 60; max = highest the
-                        monitor and the Mac encoder allow)
+                        monitor and the Mac allow, at most 120 Hz)
   --bitrate MBPS        average bitrate (default: sender's)
   --hwaccel NAME        auto | none | d3d11va | vaapi | vulkan | videotoolbox (default auto)
   --threads N           software decoding threads (default 0 = auto)
@@ -51,7 +51,7 @@ usage: vdview <mac-host>[:port] [options]
 
 keys while running:
   F2  8-bit <-> 10-bit      F3  4:2:0 <-> 4:4:4      F4  cycle refresh rate (max / 120 / 60 Hz)
-  F11 fullscreen on/off     Esc leave fullscreen
+  F5  HiDPI (2x) <-> 1x     F11 fullscreen on/off     Esc leave fullscreen
 
 self-test (no sender or display needed):
   vdview --snapshot IN.hevc OUT.ppm [--hwaccel NAME]
@@ -61,6 +61,11 @@ self-test (no sender or display needed):
 
 /// The M1's HEVC encoder sustains roughly this many pixels per second.
 const ENCODER_PIXEL_RATE: f64 = 650e6;
+/// Highest refresh rate requested when matching the monitor (mHz). macOS accepts up to 240 Hz for
+/// the virtual display, but ScreenCaptureKit delivered ~110 fps at 120-180 Hz and only ~55 fps at
+/// 240 Hz (FHD, 2026-11-12), so asking for more than 120 Hz gains nothing or makes it worse.
+/// `--mode` still requests any rate, for experiments.
+const MAX_REFRESH_MHZ: u32 = 120_000;
 
 struct Args {
     server: String,
@@ -213,11 +218,14 @@ impl Args {
         let pixels = (pw * ph) as f64;
         let max = [mhz, 120_000, 100_000, 60_000]
             .into_iter()
-            .find(|&r| r <= mhz && pixels * r as f64 / 1000.0 <= ENCODER_PIXEL_RATE)
+            .find(|&r| {
+                r <= mhz && r <= MAX_REFRESH_MHZ && pixels * r as f64 / 1000.0 <= ENCODER_PIXEL_RATE
+            })
             .unwrap_or(60_000);
         if max != mhz {
             println!(
-                "note: monitor runs at {:.0} Hz but the Mac encoder tops out at {:.0} Hz for {pw}x{ph}",
+                "note: monitor runs at {:.0} Hz; requesting at most {:.0} Hz for {pw}x{ph} \
+                 (Mac capture/encoder limits)",
                 mhz as f64 / 1000.0,
                 max as f64 / 1000.0
             );
@@ -412,7 +420,7 @@ impl Running {
     /// Re-renders (or hides) the status panel and redraws so it shows even on a static screen.
     fn update_osd(&mut self) {
         let keys = format!(
-            "F1 {}  F2 BIT DEPTH  F3 CHROMA  F4 REFRESH  F11 FULLSCREEN",
+            "F1 {}  F2 BIT DEPTH  F3 CHROMA  F4 REFRESH  F5 HIDPI  F11 FULLSCREEN",
             if self.osd_pinned { "HIDE" } else { "PIN" }
         );
         let lines = if !self.osd_visible() {
@@ -748,6 +756,29 @@ impl ApplicationHandler<UserEvent> for App {
                             .unwrap_or(0);
                         r.hello.refresh_mhz = r.refresh_choices[(i + 1) % r.refresh_choices.len()];
                         r.reconfigure("refresh rate");
+                    }
+                }
+                // Same backing pixels either way (e.g. 3840x2160 1x <-> 1920x1080 HiDPI), so the
+                // pixel rate and the refresh choices stay valid.
+                Key::Named(NamedKey::F5) => {
+                    let h = &mut r.hello;
+                    if h.width == 0 {
+                        println!("HiDPI switching needs a requested mode (not --server-mode)");
+                    } else if h.hidpi {
+                        (h.width, h.height, h.hidpi) = (h.width * 2, h.height * 2, false);
+                        r.reconfigure("1x");
+                    } else if h.width % 2 == 0
+                        && h.height % 2 == 0
+                        && h.width >= 640
+                        && h.height >= 480
+                    {
+                        (h.width, h.height, h.hidpi) = (h.width / 2, h.height / 2, true);
+                        r.reconfigure("HiDPI");
+                    } else {
+                        println!(
+                            "{}x{} is too small or odd-sized for HiDPI",
+                            h.width, h.height
+                        );
                     }
                 }
                 _ => {}

@@ -193,7 +193,11 @@ impl Receiver {
                 let _ = self.socket.send(&protocol::keepalive(self.session_id));
                 last_keepalive = Some(now);
             }
-            let ping_every = if now - started < WARMUP { PING_EVERY_WARMUP } else { PING_EVERY };
+            let ping_every = if now - started < WARMUP {
+                PING_EVERY_WARMUP
+            } else {
+                PING_EVERY
+            };
             if last_ping.is_none_or(|t| now - t >= ping_every) {
                 self.control.ping();
                 last_ping = Some(now);
