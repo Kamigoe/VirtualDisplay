@@ -60,4 +60,11 @@ Windows 側のセッションから Mac 側のセッションへの引き継ぎ�
   - `vdsend.log` に `control listening on tcp port 7777` を確認。更新時点で受信側の接続はなし。
   - 補足：Mac のリポジトリに 11/11 の未コミットの Windows 対応（`client/windows/` ほか、Windows 側のコミットで置き換え済み）が
     残っていたため、`git stash`（`Mac-side WIP Windows support (2026-11-11)…`）に退避してから pull した。
-- 手順 6（2 台同時起動の試験）は未実施。Windows 側で試験後、Mac のログ確認を依頼すること。
+- 2026-11-13 Windows 側で手順 6 の試験を実施（どちらも `--windowed --server-mode`）：
+  - 0 秒 A 起動 → 接続。6 秒 B 起動 → B が接続し、A は `the sender switched to another viewer (192.168.11.12:49593)`
+    と出して停止。その後 10 秒間、A は再接続しなかった（修正前は 2 秒おきに奪い合っていた）。
+  - 16 秒 A で Enter → A が再接続して映像を取り戻し、今度は B が同じ表示で停止。
+  - A・B とも、接続中は映像が流れた（統計行 13 行 / 10 行）。
+- 同じ時間帯の Mac 側のログ（手順 6）：`replacing viewer` はちょうど 2 回（B が A を、10 秒後に再接続した A が B を）。
+  その間に再接続の `viewer connected` はなく、最後は試験終了時の `viewer disconnected` のみ。**対策は有効。**
+  置き換えられた側の接続は `detach` を通らないため、`viewer disconnected` が出ないのは想定どおり。
