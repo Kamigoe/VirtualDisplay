@@ -53,4 +53,11 @@ Windows 側のセッションから Mac 側のセッションへの引き継ぎ�
 
 ## 結果
 
-- （Mac 側のセッションが記入）
+- 2026-11-13 02:22（JST）Mac 側で更新完了（`28b6651`）。
+  - `swift build -c release`：警告・エラーなし。
+  - 起動引数は従来どおり `--mode 3440x1440@60 --main` で `install.sh` を実行。エージェントは自動で再起動（`restarted com.kamigoe.vdsend (update)`）。
+  - 署名の designated requirement は不変（`certificate leaf = H"0764f89b…"`）。画面収録の許可は `granted` のまま。
+  - `vdsend.log` に `control listening on tcp port 7777` を確認。更新時点で受信側の接続はなし。
+  - 補足：Mac のリポジトリに 11/11 の未コミットの Windows 対応（`client/windows/` ほか、Windows 側のコミットで置き換え済み）が
+    残っていたため、`git stash`（`Mac-side WIP Windows support (2026-11-11)…`）に退避してから pull した。
+- 手順 6（2 台同時起動の試験）は未実施。Windows 側で試験後、Mac のログ確認を依頼すること。
