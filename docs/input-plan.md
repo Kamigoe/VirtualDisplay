@@ -2,6 +2,11 @@
 
 `docs/roadmap.md` の 2.「mac-input-cast の機能を vdview / vdsend へ」の設計。2026-11-13 確定。
 
+**状況**：フェーズ 1 は実装・試験済み（2026-11-13、`44f991c`。Windows → Mac で動作を確認。
+経過は `docs/mac-handoff-input.md`）。次はフェーズ 2（Windows キーと Alt+Tab、Ubuntu での試験）。
+試験で、Win+C が Windows の Copilot に、Win 単独がスタートメニューに取られることを確認した（Mac の Control の
+組み合わせが使えない）。フェーズ 2 で解消する。
+
 ## 目的
 
 `vdview` の画面を見ながら、PC のキーボードとマウスで Mac を操作できるようにする。

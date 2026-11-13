@@ -89,3 +89,14 @@ Windows 側のセッションから Mac 側のセッションへの引き継ぎ�
   - インストール前に確認したこと：認証前の入力メッセージ（`secure`）は無視され、復号に失敗したら接続を切る。
     クライアントの MAC は定数時間で比較している。
 - 手順 9（Windows からのキーボード・マウスの試験と、Mac のログ確認）は未実施。
+- 2026-11-13 Windows 側で手順 9 の試験を実施：
+  - シークレットを `vdview --set-input-secret` で保存。接続すると認証が成功し、
+    `input to the Mac: on (F8 turns it off)`（＝ Mac 側がアクセシビリティの許可ありと報告）。
+  - 利用者がキーボード・マウスを操作して試験し、「よい感じに動いている」。キーの押しっぱなし
+    （F8 での切り替え、別ウィンドウへの切り替え）も、簡単に試した範囲では問題なし。
+  - 新しい `vdview` を更新前の `vdsend` につないだ場合は、映像は映り、入力は
+    `no reply (vdsend too old?)` で OFF のままだった（互換性あり）。
+  - Win キーは Windows に先に取られる：Win+C は Windows の Copilot が開き、Win 単独ではスタートメニューが出る。
+    Win キーを Mac の Control にしている既定では、Mac の Control の組み合わせが使えない。フェーズ 2
+    （`docs/input-plan.md` の D2、低レベルのキーボードフック）で対応する想定どおりの制約。
+  - Mac 側のログ（`input: ... authenticated`）は未確認。
