@@ -78,4 +78,14 @@ Windows 側のセッションから Mac 側のセッションへの引き継ぎ�
 
 ## 結果
 
-（Mac 側のセッションが記入する）
+- 2026-11-13 13:55（JST）Mac 側で手順 1〜8 を実施（`44f991c`）。
+  - 手順 2：`swift build -c release` はエラー・警告なし。**コードの修正は不要だった。**
+  - 手順 3：`--input-self-test` は全 12 行 `ok`、`input self-test passed`。
+  - 手順 4〜5：起動引数は従来どおり `--mode 3440x1440@60 --main`。`install.sh` でエージェントが自動再起動し、
+    `control listening on tcp port 7777` を確認。
+  - 手順 6：アクセシビリティの許可を要求済み（`accessibility permission: requested`）。画面収録は `granted` のまま。
+    **利用者がシステム設定でオンにするのを待っている。**
+  - 手順 7：`~/Library/VirtualDisplay/input-secret` を作成（権限 600）。値は利用者に直接伝えた（ここには書かない）。
+  - インストール前に確認したこと：認証前の入力メッセージ（`secure`）は無視され、復号に失敗したら接続を切る。
+    クライアントの MAC は定数時間で比較している。
+- 手順 9（Windows からのキーボード・マウスの試験と、Mac のログ確認）は未実施。
