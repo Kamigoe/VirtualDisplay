@@ -10,6 +10,8 @@ mod receiver;
 mod render;
 mod secure;
 mod stats;
+#[cfg(windows)]
+mod winhook;
 
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
@@ -65,7 +67,8 @@ input (keyboard and mouse to the Mac; needs the same secret on both sides, see R
 
 keys while running:
   F8  input to the Mac on/off (starts on). While on, every other key goes to the Mac, so the
-      keys below work only while it is off.
+      keys below work only while it is off. On Windows this includes the Windows key, Alt+Tab,
+      Alt+F4 and Ctrl+Esc while vdview is in front (a role of none leaves that key to Windows).
   F2  8-bit <-> 10-bit      F3  4:2:0 <-> 4:4:4      F4  cycle refresh rate (max / 120 / 60 Hz)
   F5  HiDPI (2x) <-> 1x     F11 fullscreen on/off     Esc leave fullscreen
 
@@ -330,6 +333,9 @@ struct Running {
     connected_at: Instant,
     /// The console already said that the sender did not answer the input handshake.
     input_silence_noted: bool,
+    /// Takes the Windows key and Alt from Windows while forwarding (see `winhook`).
+    #[cfg(windows)]
+    hook: Option<winhook::Hook>,
 
     /// Status panel: shown while pinned (F1), until `osd_until`, or while a switch is pending.
     osd_pinned: bool,
@@ -870,6 +876,10 @@ impl App {
         } else {
             attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(monitor.clone())));
         }
+        // Raw keyboard input (winit's device events, unused here) would stop Windows from calling
+        // the keyboard hook that keeps Win / Alt+Tab away from Windows (see winhook).
+        #[cfg(windows)]
+        el.listen_device_events(winit::event_loop::DeviceEvents::Never);
         let window = Arc::new(el.create_window(attrs)?);
         window.set_cursor_visible(self.args.windowed); // the Mac's cursor is part of the picture
         let (renderer, uploader) = Renderer::new(window.clone(), self.args.vsync)?;
@@ -878,6 +888,16 @@ impl App {
         refresh_choices.retain(|&r| r <= max_refresh);
         refresh_choices.sort_unstable_by(|a, b| b.cmp(a));
         refresh_choices.dedup();
+        #[cfg(windows)]
+        let hook = {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            match window.window_handle().map(|h| h.as_raw()) {
+                Ok(RawWindowHandle::Win32(h)) => {
+                    winhook::Hook::install(h.hwnd.get(), self.args.modifiers)
+                }
+                _ => None,
+            }
+        };
         let mut r = Running {
             window,
             renderer,
@@ -904,6 +924,8 @@ impl App {
             pointer: None,
             connected_at: Instant::now(),
             input_silence_noted: false,
+            #[cfg(windows)]
+            hook,
             osd_pinned: false,
             osd_until: Some(Instant::now() + OSD_SHOW),
             switching: false,
@@ -1053,6 +1075,14 @@ impl ApplicationHandler<UserEvent> for App {
         let Some(r) = self.running.as_mut() else {
             return;
         };
+        #[cfg(windows)]
+        if let Some(h) = &r.hook {
+            h.update(if r.forwarding() {
+                r.control.as_ref()
+            } else {
+                None
+            });
+        }
         if r.forwarding() {
             r.flush_pointer(); // at most one pointer message per turn of the event loop
         }

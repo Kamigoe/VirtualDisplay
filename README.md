@@ -122,7 +122,7 @@ vdview <MacのIP>[:port] [options]
 | `--windowed` | ウィンドウで起動（F11 で全画面切替、Esc で全画面解除） |
 | `--vsync` | FIFO 表示（ティアリングなし・遅延増） |
 | `--input-secret PATH` | 入力用の共有シークレットの場所（既定：Windows `%APPDATA%vdviewinput-secret`、Ubuntu `~/.config/vdview/input-secret`） |
-| `--map-ctrl` / `--map-alt` / `--map-win ROLE` | PC の Ctrl / Alt / Windows キーを Mac の何にするか：`cmd` / `ctrl` / `alt` / `shift` / `none`（既定 Ctrl→Command、Alt→Option、Win→Control） |
+| `--map-ctrl` / `--map-alt` / `--map-win ROLE` | PC の Ctrl / Alt / Windows キーを Mac の何にするか：`cmd` / `ctrl` / `alt` / `shift` / `none`（既定 Ctrl→Command、Alt→Option、Win→Control）。`none` にしたキーは Windows に残る（例：`--map-win none` で Windows キーは Windows の操作のまま） |
 
 表示中のキー操作。**入力の転送が ON の間は、F8 以外のキーはすべて Mac に送られる**ので、
 下の F1〜F5・F11・Esc・Enter は F8 で転送を OFF にしてから使う（シークレットがなく転送できないときは常に効く）：
@@ -162,7 +162,10 @@ fps / 表示 fps / ビットレート / 遅延（Mac で描画 → PC で表示�
 - 転送を OFF にしたとき・ウィンドウが前面でなくなったとき・接続が切れたときは、押されているキーとボタンを Mac 側で離す。
 - 認証：両側が同じシークレットを持つことを毎回確かめ合う（シークレット自体は通信に流さない）。
   鍵は接続ごとに X25519 で作り直し、入力は ChaCha20-Poly1305 で暗号化する。映像は暗号化しない。仕様は `docs/protocol.md`。
-- まだできないこと：Windows キーと Alt+Tab は Windows が先に処理する（次の段階で対応予定）。Ctrl+Alt+Del は送れない。
+- Windows では、転送が ON で `vdview` が前面にある間、Windows キー・Alt（Alt+Tab、Alt+F4、Alt+Space など）・Ctrl+Esc も
+  Windows ではなく Mac に送る（低レベルのキーボードフックで先に受け取る）。転送が OFF のとき、別のウィンドウが前面のときは
+  今までどおり Windows が処理する。Ctrl+Alt+Del と Win+L は横取りできない。
+- まだできないこと：Ubuntu では Super キーなどを GNOME が先に処理する。
 
 ### 自己テスト
 

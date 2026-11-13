@@ -3,9 +3,25 @@
 `docs/roadmap.md` の 2.「mac-input-cast の機能を vdview / vdsend へ」の設計。2026-11-13 確定。
 
 **状況**：フェーズ 1 は実装・試験済み（2026-11-13、`44f991c`。Windows → Mac で動作を確認。
-経過は `docs/mac-handoff-input.md`）。次はフェーズ 2（Windows キーと Alt+Tab、Ubuntu での試験）。
+経過は `docs/mac-handoff-input.md`）。
 試験で、Win+C が Windows の Copilot に、Win 単独がスタートメニューに取られることを確認した（Mac の Control の
-組み合わせが使えない）。フェーズ 2 で解消する。
+組み合わせが使えない）。
+
+フェーズ 2 の Windows 分を実装（2026-11-13、`client/src/winhook.rs`）：転送 ON かつ `vdview` が前面のとき、
+低レベルのキーボードフックで Win・Alt・（Ctrl を押している間の）Esc を Windows に渡さず、`vdview` から直接 Mac へ送る。
+Windows は Win / Alt が押されたことを知らないので、組み合わせのもう一方のキー（C、Tab、F4 など）は普通のキーとして
+`vdview` に届き、いつもの経路で送られる。押下を横取りしたキーは離すときも横取りし、その逆も同じ（片方だけ届くことはない）。
+`none` に割り当てたキーは横取りしない。Ubuntu の試験は未実施。
+
+最初の版は利用者の試験で効かなかった（Win・Alt 系が Windows に取られ、Alt+F4 で閉じた）。調べると、フックが一度も
+呼ばれていなかった。原因は **winit がウィンドウ作成時にキーボードの Raw Input を登録すること**で、登録した
+プロセスの低レベルキーボードフックは Windows から呼ばれなくなる（起動の各段階で止めて切り分け、
+`DeviceEvents::Never` で登録をやめると呼ばれることを確認）。`vdview` はこの入力を使っていないので Windows では
+登録しない。あわせて、描画などでイベントループが詰まってもキー入力を遅らせないよう、フックは専用スレッドで動かす。
+試験（2026-11-13、合成したキー入力。`VDVIEW_HOOK_TEST=1` で有効）：転送 ON で Alt+F4 → Alt を横取りし、
+`vdview` は閉じない。F8 で OFF にしてから Alt+F4 → 今までどおり閉じる。
+同日、利用者が実際のキーボードで試験し、Win 系・Alt 系とも問題なし（Win+C、Win 単独、Alt+Tab、Alt+F4、F8 で OFF に
+したときに Windows に戻ること）。
 
 ## 目的
 
