@@ -5,7 +5,7 @@ import CoreGraphics
 // Permission helpers for the installed app bundle (run via `open vdsend.app --args ...` so macOS
 // attributes the request to the app, not the terminal).
 /// Prints and appends to ~/Library/Logs/vdsend-permission.log (stdout is lost when run via `open`).
-func reportPermission(_ line: String) -> Never {
+func logPermission(_ line: String) {
     print(line)
     let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/vdsend-permission.log")
     let entry = Data("\(Date()) \(line)\n".utf8)
@@ -15,15 +15,30 @@ func reportPermission(_ line: String) -> Never {
     } else {
         try? entry.write(to: url)
     }
+}
+/// Logs the screen recording state and exits with it (0 = granted).
+func reportPermission(_ line: String) -> Never {
+    logPermission(line)
     exit(line.hasSuffix(": granted") ? 0 : 1)
 }
 if CommandLine.arguments.contains("--check-permission") {
+    // Exit status follows screen recording (required); accessibility only matters for input.
+    logPermission("accessibility permission (keyboard/mouse from the viewer): \(CGPreflightPostEventAccess() ? "granted" : "not granted")")
     reportPermission("screen recording permission: \(CGPreflightScreenCaptureAccess() ? "granted" : "not granted")")
 }
 if CommandLine.arguments.contains("--request-permission") {
-    // Adds vdsend to System Settings > Privacy & Security > Screen & System Audio Recording.
+    // Adds vdsend to System Settings > Privacy & Security > Accessibility (to replay the viewer's
+    // keyboard and mouse) and > Screen & System Audio Recording.
+    let input = CGRequestPostEventAccess()
+    logPermission("accessibility permission: \(input ? "granted" : "requested; enable vdsend in System Settings > Privacy & Security > Accessibility")")
     let ok = CGRequestScreenCaptureAccess()
     reportPermission("screen recording permission: \(ok ? "granted" : "requested; enable vdsend in System Settings")")
+}
+if CommandLine.arguments.contains("--input-self-test") {
+    // Checks that this build derives the same keys and ciphertexts as vdview (docs/protocol.md).
+    let ok = InputCrypto.selfTest()
+    print(ok ? "input self-test passed" : "input self-test FAILED")
+    exit(ok ? 0 : 1)
 }
 
 let options = Options.parse(Array(CommandLine.arguments.dropFirst()))
@@ -72,7 +87,8 @@ do {
 Task { @MainActor in
     do {
         try await streamer.start()
-        control = try ControlServer(port: options.port, streamer: streamer, video: video)
+        control = try ControlServer(port: options.port, streamer: streamer, video: video,
+                                    displayID: streamer.displayID!)
     } catch {
         log("error: \(error.localizedDescription)")
         exit(1)

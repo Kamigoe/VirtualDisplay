@@ -81,6 +81,71 @@ UTF-8 で新しい受信側の接続元（例 `192.168.11.12:51232`）。送信�
 
 UTF-8 のメッセージ。送信後に接続を閉じる。
 
+## 入力（キーボード・マウス）
+
+受信側の入力を送信側（Mac）へ送る。設計の経緯は `docs/input-plan.md`。
+
+- 両側が同じ**共有シークレット**（32 バイトの乱数）を持つ。通信には流さない。
+  Mac は `~/Library/VirtualDisplay/input-secret`、PC は `%APPDATA%\vdview\input-secret`（Windows）/
+  `~/.config/vdview/input-secret`（Ubuntu）。どちらも 16 進 64 文字のテキスト。
+- Start の後、受信側がシークレットを持っていれば握手（0x10〜0x13）を始める。成功すると、以後の入力は
+  0x30 Secure（暗号化した入れ物）の中で送る。握手が成功していない接続からの入力は受け付けない。
+- 映像は暗号化しない。
+- この節のメッセージを知らない相手は未知の type として無視する（古い送信側に新しい受信側をつなぐと、
+  握手に返事がないので映像だけになる）。
+
+### 握手
+
+| type | 向き | body |
+|---|---|---|
+| 0x10 AuthHello | C→S | `client_nonce`(32) ‖ `client_pub`(32、X25519 の使い捨て公開鍵) |
+| 0x11 AuthChallenge | S→C | `server_nonce`(32) ‖ `server_pub`(32) ‖ `server_mac`(32) |
+| 0x12 AuthConfirm | C→S | `client_mac`(32) |
+| 0x13 AuthResult | S→C | u8 `status`：0 = 成功、1 = 認証失敗、2 = 送信側にシークレットがない、3 = 順序違反 |
+
+鍵の導出（`‖` は連結、文字列は ASCII、HKDF と HMAC は SHA-256）：
+
+```
+transcript = "vdinput v1" ‖ client_nonce ‖ client_pub ‖ server_nonce ‖ server_pub
+th         = SHA-256(transcript)
+dh         = X25519(自分の秘密鍵, 相手の公開鍵)        // 32 バイトすべて 0 なら中止
+prk        = HKDF-Extract(salt = th, ikm = psk ‖ dh)
+k_auth     = HKDF-Expand(prk, "vdinput auth", 32)
+k_c2s      = HKDF-Expand(prk, "vdinput c2s", 32)
+k_s2c      = HKDF-Expand(prk, "vdinput s2c", 32)
+server_mac = HMAC(k_auth, "server" ‖ th)
+client_mac = HMAC(k_auth, "client" ‖ th)
+```
+
+- 受信側は `server_mac` を確かめてから `client_mac` を返す（シークレットを知らない相手には入力を送らない）。
+  送信側は `client_mac` を確かめてから入力を受け付ける。比較は定数時間。
+- 試験データ：psk = `00 01 … 1f`、受信側の秘密鍵 = `20 21 … 3f`、client_nonce = `40 … 5f`、
+  送信側の秘密鍵 = `60 … 7f`、server_nonce = `80 … 9f` のとき、
+  `client_mac` = `7bc79217…0507cfc`（全値は `client/src/secure.rs` の `test_vector`。
+  `vdsend --input-self-test` が同じ値を再現する）。
+
+### 0x30 Secure（C→S、S→C）
+
+- body = ChaCha20-Poly1305 の暗号文 ‖ タグ(16)。鍵は C→S が `k_c2s`、S→C が `k_s2c`。
+- nonce（12 バイト）= `00 00 00 00` ‖ u64 カウンタ。向きごとに 0 から 1 ずつ増やす。
+  受け手は次の番号でしか復号しないので、再送・入れ替え・削除は復号失敗になる。復号に失敗したら接続を切る。
+- 追加認証データ = `30`（1 バイト）。
+- 平文 = 内側の type(u8) ‖ 内側の body。
+
+| 内側の type | 向き | body |
+|---|---|---|
+| 0x20 Key | C→S | u8 `down`(1/0) ‖ u16 `mac_keycode`（macOS の仮想キーコード `kVK_*`）‖ u8 `flags`（bit0 = オートリピート） |
+| 0x21 ImeToggle | C→S | なし。送信側が英数 ⇔ かなを切り替える |
+| 0x22 Pointer | C→S | u16 `x` ‖ u16 `y`：仮想モニター全体を 0〜65535 に正規化した位置 |
+| 0x23 Button | C→S | u8 `button`（0 左、1 右、2 中、3 戻る、4 進む）‖ u8 `down` |
+| 0x24 Scroll | C→S | i16 `dx` ‖ i16 `dy` ‖ u8 `unit`（0 = 1/100 行、1 = ピクセル）。正の dy は上 |
+| 0x25 ReleaseAll | C→S | なし。押されているキーとボタンをすべて離す |
+| 0x40 InputStatus | S→C | u8 `flags`（bit0 = 注入できる＝アクセシビリティの許可あり）。握手の直後と、変わったときに送る |
+
+修飾キーは修飾キー自身のキーコード（Command 55 / 54、Shift 56 / 60、Option 58 / 61、Control 59 / 62）で送り、
+送信側が押されている修飾キーからフラグを組み立てる。送信側は接続が切れたとき、または受信側が入れ替わったときも、
+押されているものをすべて離す。
+
 ## 映像パケット (UDP, S→C)
 
 1 フレーム（HEVC の 1 アクセスユニット、Annex-B）を固定長チャンクに分割して送る。

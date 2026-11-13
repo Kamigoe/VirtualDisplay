@@ -11,7 +11,31 @@ enum Proto {
         case ping = 0x04
         case pong = 0x05
         case replaced = 0x06
+        // Input: handshake in the clear, then everything inside `secure`.
+        case authHello = 0x10
+        case authChallenge = 0x11
+        case authConfirm = 0x12
+        case authResult = 0x13
+        case secure = 0x30
         case error = 0x7F
+    }
+
+    /// Messages inside `secure`.
+    enum Input: UInt8 {
+        case key = 0x20
+        case imeToggle = 0x21
+        case pointer = 0x22
+        case button = 0x23
+        case scroll = 0x24
+        case releaseAll = 0x25
+        case status = 0x40
+    }
+
+    enum AuthStatus: UInt8 {
+        case ok = 0
+        case failed = 1
+        case noSecret = 2
+        case outOfOrder = 3
     }
 
     static let videoMagic: UInt8 = 0x56 // 'V'

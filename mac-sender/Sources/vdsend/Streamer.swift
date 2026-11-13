@@ -18,6 +18,9 @@ final class Streamer {
     /// Held while someone is watching: keeps the displays awake and the process out of App Nap.
     private var watchActivity: NSObjectProtocol?
 
+    /// The virtual monitor (stays the same across mode changes); nil before `start`.
+    var displayID: CGDirectDisplayID? { display?.displayID }
+
     init(options: Options, stats: Stats, onFrame: @escaping Encoder.OutputHandler) {
         self.options = options
         self.stats = stats

@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Network
 
@@ -15,6 +16,17 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
     private var lastHeard: UInt64 = 0
     private var watchdog: DispatchSourceTimer?
 
+    /// Input from the current viewer: accepted only after it proved it knows the input secret.
+    private enum Auth {
+        case idle
+        case challenged(InputCrypto.Pending)
+        case ready(opener: InputCrypto.Opener, sealer: InputCrypto.Sealer)
+    }
+    private var auth = Auth.idle
+    private let injector: Injector
+    /// Last accessibility state reported to the viewer.
+    private var reportedPermission: Bool?
+
     /// A viewer that vanished without closing (Wi-Fi drop) is dropped after this long.
     private static let viewerTimeout: UInt64 = 6_000_000 // µs
 
@@ -22,9 +34,10 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
     private static let keyframeRequestInterval: UInt64 = 100_000 // µs
     private static let maxMessage = 64 * 1024
 
-    init(port: UInt16, streamer: Streamer, video: VideoSender) throws {
+    init(port: UInt16, streamer: Streamer, video: VideoSender, displayID: CGDirectDisplayID) throws {
         self.streamer = streamer
         self.video = video
+        injector = Injector(displayID: displayID)
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
         let params = NWParameters(tls: nil, tcp: tcp)
@@ -63,6 +76,7 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
             queue.asyncAfter(deadline: .now() + 1) { old.cancel() }
             video.endSession()
         }
+        resetInput()
         client = c
         lastHeard = serverMicrosNow()
         c.stateUpdateHandler = { [weak self, weak c] state in
@@ -83,6 +97,7 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
     private func detach(_ c: NWConnection) {
         guard client === c else { return }
         client = nil
+        resetInput()
         video.endSession()
         Task { @MainActor in await self.streamer.removeViewer(Self.viewerID) }
         log("viewer disconnected: \(c.endpoint)")
@@ -108,6 +123,7 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
     }
 
     private func checkViewer() {
+        sendInputStatus()
         guard let c = client, serverMicrosNow() &- lastHeard > Self.viewerTimeout else { return }
         log("viewer \(c.endpoint) silent for \(Self.viewerTimeout / 1_000_000)s; dropping it")
         c.cancel()
@@ -134,6 +150,9 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
             w.u64(clientMicros)
             w.u64(serverMicrosNow())
             send(.pong, w.data, to: c)
+        case .authHello: handleAuthHello(Data(msg.dropFirst()), from: c)
+        case .authConfirm: handleAuthConfirm(Data(msg.dropFirst()), from: c)
+        case .secure: handleSecure(Data(msg.dropFirst()), from: c)
         default:
             log("control: unexpected message \(type)")
         }
@@ -198,6 +217,103 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
                 self.send(.start, w.data, to: c)
                 log("session \(String(format: "%08x", sid)) started: \(applied.pixelWidth)x\(applied.pixelHeight) @ \(applied.refresh) Hz, \(applied.bitDepth)-bit")
             }
+        }
+    }
+
+    // MARK: - input (queue-confined)
+
+    /// Forgets the viewer's authentication and lets go of anything it still held.
+    private func resetInput() {
+        if case .ready = auth { injector.releaseAll() }
+        auth = .idle
+        reportedPermission = nil
+    }
+
+    private func authResult(_ status: Proto.AuthStatus, to c: NWConnection) {
+        send(.authResult, Data([status.rawValue]), to: c)
+    }
+
+    private func handleAuthHello(_ body: Data, from c: NWConnection) {
+        guard case .idle = auth else {
+            log("input: handshake restarted out of order; input disabled for \(c.endpoint)")
+            resetInput()
+            authResult(.outOfOrder, to: c)
+            return
+        }
+        guard let secret = InputCrypto.loadSecret() else {
+            log("input: no input secret at \(InputCrypto.secretURL.path) (run scripts/make-input-secret.sh)")
+            authResult(.noSecret, to: c)
+            return
+        }
+        do {
+            let (pending, challenge) = try InputCrypto.Pending.respond(psk: secret, hello: body)
+            auth = .challenged(pending)
+            send(.authChallenge, challenge, to: c)
+        } catch {
+            log("input: bad AuthHello from \(c.endpoint)")
+            authResult(.failed, to: c)
+        }
+    }
+
+    private func handleAuthConfirm(_ body: Data, from c: NWConnection) {
+        guard case .challenged(let pending) = auth else {
+            resetInput()
+            authResult(.outOfOrder, to: c)
+            return
+        }
+        guard let channel = pending.confirm(body) else {
+            auth = .idle
+            log("input: \(c.endpoint) does not have the same input secret; input refused")
+            authResult(.failed, to: c)
+            return
+        }
+        auth = .ready(opener: channel.opener, sealer: channel.sealer)
+        authResult(.ok, to: c)
+        log("input: \(c.endpoint) authenticated\(Injector.permitted ? "" : "; accessibility permission missing, events will be dropped")")
+        sendInputStatus()
+    }
+
+    /// Tells the viewer whether events can be injected, when that is new or changed.
+    private func sendInputStatus() {
+        guard let c = client, case .ready(let opener, var sealer) = auth else { return }
+        let permitted = Injector.permitted
+        guard permitted != reportedPermission else { return }
+        reportedPermission = permitted
+        let sealed = sealer.seal(Proto.Input.status.rawValue, Data([permitted ? 1 : 0]))
+        auth = .ready(opener: opener, sealer: sealer)
+        send(.secure, sealed, to: c)
+    }
+
+    private func handleSecure(_ body: Data, from c: NWConnection) {
+        guard case .ready(var opener, let sealer) = auth else { return } // not authenticated: ignore
+        guard let opened = opener.open(body) else {
+            log("input: message from \(c.endpoint) failed to authenticate; closing")
+            resetInput()
+            c.cancel()
+            return
+        }
+        auth = .ready(opener: opener, sealer: sealer)
+        var r = ByteReader(opened.1)
+        guard let kind = Proto.Input(rawValue: opened.0) else { return }
+        switch kind {
+        case .key:
+            guard let down = r.u8(), let code = r.u16(), let flags = r.u8() else { return }
+            injector.key(code, down: down != 0, autorepeat: flags & 1 != 0)
+        case .imeToggle:
+            injector.imeToggle()
+        case .pointer:
+            guard let x = r.u16(), let y = r.u16() else { return }
+            injector.pointer(x: x, y: y)
+        case .button:
+            guard let b = r.u8(), let down = r.u8() else { return }
+            injector.button(b, down: down != 0)
+        case .scroll:
+            guard let dx = r.u16(), let dy = r.u16(), let unit = r.u8() else { return }
+            injector.scroll(dx: Int16(bitPattern: dx), dy: Int16(bitPattern: dy), unit: unit)
+        case .releaseAll:
+            injector.releaseAll()
+        case .status:
+            break // Mac -> viewer only
         }
     }
 

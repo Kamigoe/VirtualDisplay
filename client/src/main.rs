@@ -3,13 +3,16 @@
 mod clock;
 mod control;
 mod decoder;
+mod input;
 mod osd;
 mod protocol;
 mod receiver;
 mod render;
+mod secure;
 mod stats;
 
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,13 +24,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::monitor::MonitorHandle;
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::clock::now_us;
-use crate::control::{Closed, Control};
+use crate::control::{Closed, Control, InputLink};
 use crate::decoder::Decoder;
+use crate::input::{MacKey, Modifiers, Role};
 use crate::protocol::{Hello, Start};
 use crate::render::Renderer;
 use crate::stats::Stats;
@@ -49,7 +53,19 @@ usage: vdview <mac-host>[:port] [options]
   --windowed            start in a window instead of borderless fullscreen (F11 toggles)
   --vsync               present with FIFO (no tearing, +latency) instead of mailbox/immediate
 
+input (keyboard and mouse to the Mac; needs the same secret on both sides, see README):
+  --input-secret PATH   secret file (default: %APPDATA%\\vdview\\input-secret on Windows,
+                        ~/.config/vdview/input-secret elsewhere)
+  --map-ctrl ROLE       what Ctrl is on the Mac: cmd | ctrl | alt | shift | none (default cmd)
+  --map-alt ROLE        what Alt is on the Mac (default alt = Option)
+  --map-win ROLE        what the Windows key is on the Mac (default ctrl)
+  vdview --set-input-secret [--input-secret PATH]
+      read the secret (64 hex digits, as printed by make-input-secret.sh) from standard input
+      and save it
+
 keys while running:
+  F8  input to the Mac on/off (starts on). While on, every other key goes to the Mac, so the
+      keys below work only while it is off.
   F2  8-bit <-> 10-bit      F3  4:2:0 <-> 4:4:4      F4  cycle refresh rate (max / 120 / 60 Hz)
   F5  HiDPI (2x) <-> 1x     F11 fullscreen on/off     Esc leave fullscreen
 
@@ -82,6 +98,8 @@ struct Args {
     monitor: Option<usize>,
     windowed: bool,
     vsync: bool,
+    input_secret: Option<PathBuf>,
+    modifiers: Modifiers,
 }
 
 impl Args {
@@ -101,6 +119,8 @@ impl Args {
             monitor: None,
             windowed: false,
             vsync: false,
+            input_secret: None,
+            modifiers: Modifiers::default(),
         };
         while let Some(arg) = it.next() {
             let mut value = || it.next().ok_or_else(|| anyhow!("{arg} needs a value"));
@@ -145,6 +165,10 @@ impl Args {
                 "--monitor" => a.monitor = Some(value()?.parse()?),
                 "--windowed" => a.windowed = true,
                 "--vsync" => a.vsync = true,
+                "--input-secret" => a.input_secret = Some(value()?.into()),
+                "--map-ctrl" => a.modifiers.ctrl = Role::parse(&value()?)?,
+                "--map-alt" => a.modifiers.alt = Role::parse(&value()?)?,
+                "--map-win" => a.modifiers.win = Role::parse(&value()?)?,
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -245,6 +269,8 @@ enum UserEvent {
     Restarted(u64, Start),
     /// The connection of generation `gen` ended.
     Closed(u64, Closed),
+    /// The input channel of generation `gen` changed state.
+    Input(u64, InputLink),
 }
 
 fn describe_start(s: &Start) -> String {
@@ -261,6 +287,8 @@ fn describe_start(s: &Start) -> String {
 const OSD_SHOW: Duration = Duration::from_secs(5);
 const RECONNECT_EVERY: Duration = Duration::from_secs(2);
 const STATS_EVERY: Duration = Duration::from_secs(1);
+/// A sender that has not answered the input handshake by then is too old to know it.
+const INPUT_REPLY_WITHIN: Duration = Duration::from_secs(3);
 
 /// The window and renderer live for the whole run; connections come and go underneath them.
 struct Running {
@@ -290,6 +318,19 @@ struct Running {
     /// keep taking the sender from each other); Enter reconnects.
     replaced_by: Option<String>,
 
+    /// Input secret, or why there is none (input then stays off).
+    secret: Result<[u8; secure::SECRET_LEN], String>,
+    modifiers: Modifiers,
+    /// F8: forward keyboard and mouse to the Mac.
+    input_on: bool,
+    /// State of this connection's input channel; None until the sender answers.
+    input_link: Option<InputLink>,
+    /// Latest pointer position (window pixels) not yet sent.
+    pointer: Option<(f64, f64)>,
+    connected_at: Instant,
+    /// The console already said that the sender did not answer the input handshake.
+    input_silence_noted: bool,
+
     /// Status panel: shown while pinned (F1), until `osd_until`, or while a switch is pending.
     osd_pinned: bool,
     osd_until: Option<Instant>,
@@ -301,23 +342,29 @@ impl Running {
     /// Starts (re)connecting in the background until it succeeds or a newer attempt replaces it.
     fn connect(&mut self) {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let (proxy, addr, hello, current) = (
+        let (proxy, addr, hello, current, secret) = (
             self.proxy.clone(),
             self.addr,
             self.hello,
             self.generation.clone(),
+            self.secret.clone().ok(),
         );
         self.connect_attempts = 0;
         let spawned = thread::Builder::new()
             .name("connect".into())
             .spawn(move || {
                 while current.load(Ordering::SeqCst) == generation {
-                    let (restart_proxy, close_proxy) = (proxy.clone(), proxy.clone());
+                    let (restart_proxy, input_proxy, close_proxy) =
+                        (proxy.clone(), proxy.clone(), proxy.clone());
                     match Control::connect(
                         addr,
                         &hello,
+                        secret,
                         move |s| {
                             let _ = restart_proxy.send_event(UserEvent::Restarted(generation, s));
+                        },
+                        move |link| {
+                            let _ = input_proxy.send_event(UserEvent::Input(generation, link));
                         },
                         move |reason| {
                             let _ = close_proxy.send_event(UserEvent::Closed(generation, reason));
@@ -373,13 +420,82 @@ impl Running {
         self.control = Some(control);
         self.start = Some(start);
         self.connect_error = None;
+        self.input_link = None;
+        self.connected_at = Instant::now();
+        self.input_silence_noted = false;
         Ok(())
     }
 
     fn end_session(&mut self) {
+        self.release_all(); // the sender also releases everything when the link drops
         self.session_stop.store(true, Ordering::Relaxed);
         if let Some(c) = self.control.take() {
             c.shutdown();
+        }
+        self.input_link = None;
+    }
+
+    /// Keyboard and mouse currently go to the Mac.
+    fn forwarding(&self) -> bool {
+        self.input_on
+            && self.control.is_some()
+            && matches!(self.input_link, Some(InputLink::Ready { .. }))
+    }
+
+    fn send_input(&self, inner: u8, body: &[u8]) {
+        if let Some(c) = &self.control {
+            c.send_input(inner, body);
+        }
+    }
+
+    /// Lets go of every key and button on the Mac (forwarding stopped or focus lost).
+    fn release_all(&self) {
+        if self.forwarding() {
+            self.send_input(protocol::INPUT_RELEASE_ALL, &[]);
+        }
+    }
+
+    /// Sends the latest pointer position, if it changed.
+    fn flush_pointer(&mut self) {
+        let Some(pos) = self.pointer.take() else {
+            return;
+        };
+        let Some(s) = &self.start else { return };
+        let size = self.window.inner_size();
+        if let Some((x, y)) = input::pointer_position(
+            pos,
+            (size.width, size.height),
+            (s.pixel_width, s.pixel_height),
+        ) {
+            let (x, y) = (x.to_be_bytes(), y.to_be_bytes());
+            self.send_input(protocol::INPUT_POINTER, &[x[0], x[1], y[0], y[1]]);
+        }
+    }
+
+    fn toggle_input(&mut self) {
+        if self.input_on {
+            self.release_all();
+        }
+        self.input_on = !self.input_on;
+        println!("input to the Mac: {}", self.input_label());
+        self.flash_osd();
+    }
+
+    /// Short state of input forwarding, for the title and the console.
+    fn input_label(&self) -> String {
+        match (&self.secret, &self.input_link) {
+            (Err(_), _) => "off (no input secret)".into(),
+            _ if self.control.is_none() => "not connected".into(),
+            (_, None) if self.connected_at.elapsed() < INPUT_REPLY_WITHIN => {
+                "authenticating".into()
+            }
+            (_, None) => "no reply (vdsend too old?)".into(),
+            (_, Some(InputLink::Failed(why))) => format!("failed: {why}"),
+            (_, Some(InputLink::Ready { permitted: false })) => {
+                "the Mac needs the accessibility permission for vdsend".into()
+            }
+            (_, Some(InputLink::Ready { .. })) if self.input_on => "on (F8 turns it off)".into(),
+            (_, Some(InputLink::Ready { .. })) => "off (F8 turns it on)".into(),
         }
     }
 
@@ -423,10 +539,18 @@ impl Running {
 
     /// Re-renders (or hides) the status panel and redraws so it shows even on a static screen.
     fn update_osd(&mut self) {
-        let keys = format!(
-            "F1 {}  F2 BIT DEPTH  F3 CHROMA  F4 REFRESH  F5 HIDPI  F11 FULLSCREEN",
-            if self.osd_pinned { "HIDE" } else { "PIN" }
-        );
+        let keys = if self.forwarding() {
+            "F8 INPUT OFF (THEN F1-F5 AND F11 CONTROL VDVIEW)".to_string()
+        } else {
+            format!(
+                "F1 {}  F2 BIT DEPTH  F3 CHROMA  F4 REFRESH  F5 HIDPI  F8 INPUT  F11 FULLSCREEN",
+                if self.osd_pinned { "HIDE" } else { "PIN" }
+            )
+        };
+        let input_line = format!("INPUT {}", self.input_label().to_uppercase())
+            .chars()
+            .take(90)
+            .collect::<String>();
         let lines = if !self.osd_visible() {
             vec![]
         } else if let Some(by) = &self.replaced_by {
@@ -481,12 +605,104 @@ impl Running {
                         String::new()
                     }
                 ),
+                input_line,
                 keys,
             ]
         };
         let scale = (3.0 * self.window.scale_factor()).round() as usize;
         self.renderer.set_osd(lines, scale);
         self.window.request_redraw();
+    }
+
+    /// Sends a key press or release (with the OS's auto-repeat) to the Mac.
+    fn forward_key(&self, e: &KeyEvent) {
+        let PhysicalKey::Code(code) = e.physical_key else {
+            return;
+        };
+        let down = e.state == ElementState::Pressed;
+        match input::mac_key(code, &self.modifiers) {
+            Some(MacKey::Code(c)) => {
+                self.send_input(protocol::INPUT_KEY, &input::key_body(down, c, e.repeat))
+            }
+            Some(MacKey::ImeToggle) if down && !e.repeat => {
+                self.send_input(protocol::INPUT_IME_TOGGLE, &[])
+            }
+            _ => {}
+        }
+    }
+
+    /// vdview's own keys (only while input forwarding is off).
+    fn key_command(&mut self, key: Key) {
+        let r = self;
+        match key {
+            Key::Named(NamedKey::F11) => {
+                let full = r.window.fullscreen().is_none();
+                r.window.set_fullscreen(
+                    full.then(|| Fullscreen::Borderless(r.window.current_monitor())),
+                );
+                r.window.set_cursor_visible(!full);
+            }
+            Key::Named(NamedKey::Escape) if r.window.fullscreen().is_some() => {
+                r.window.set_fullscreen(None);
+                r.window.set_cursor_visible(true);
+            }
+            Key::Named(NamedKey::Enter) if r.replaced_by.is_some() => {
+                r.replaced_by = None;
+                println!("reconnecting (taking the sender back)");
+                r.connect();
+            }
+            Key::Named(NamedKey::F1) => {
+                r.osd_pinned = !r.osd_pinned;
+                r.osd_until = None;
+                r.update_osd();
+            }
+            Key::Named(NamedKey::F2) => {
+                if r.hello.chroma444 {
+                    println!("4:4:4 is 8-bit only on the Mac's encoder");
+                } else {
+                    r.hello.bit_depth = if r.hello.bit_depth == 10 { 8 } else { 10 };
+                    r.reconfigure("bit depth");
+                }
+            }
+            Key::Named(NamedKey::F3) => {
+                r.hello.chroma444 = !r.hello.chroma444;
+                r.reconfigure("chroma");
+            }
+            Key::Named(NamedKey::F4) => {
+                if r.hello.width == 0 {
+                    println!("refresh switching needs a requested mode (not --server-mode)");
+                } else if r.refresh_choices.len() > 1 {
+                    let i = r
+                        .refresh_choices
+                        .iter()
+                        .position(|&c| c == r.hello.refresh_mhz)
+                        .unwrap_or(0);
+                    r.hello.refresh_mhz = r.refresh_choices[(i + 1) % r.refresh_choices.len()];
+                    r.reconfigure("refresh rate");
+                }
+            }
+            // Same backing pixels either way (e.g. 3840x2160 1x <-> 1920x1080 HiDPI), so the
+            // pixel rate and the refresh choices stay valid.
+            Key::Named(NamedKey::F5) => {
+                let h = &mut r.hello;
+                if h.width == 0 {
+                    println!("HiDPI switching needs a requested mode (not --server-mode)");
+                } else if h.hidpi {
+                    (h.width, h.height, h.hidpi) = (h.width * 2, h.height * 2, false);
+                    r.reconfigure("1x");
+                } else if h.width % 2 == 0 && h.height % 2 == 0 && h.width >= 640 && h.height >= 480
+                {
+                    (h.width, h.height, h.hidpi) = (h.width / 2, h.height / 2, true);
+                    r.reconfigure("HiDPI");
+                } else {
+                    println!(
+                        "{}x{} is too small or odd-sized for HiDPI",
+                        h.width, h.height
+                    );
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -607,6 +823,21 @@ impl App {
         };
         let (hello, max_refresh) = self.args.hello(monitor.as_ref());
         let addr = self.args.server_addr()?;
+        let secret = match self
+            .args
+            .input_secret
+            .clone()
+            .or_else(secure::default_secret_path)
+        {
+            None => Err("no place for the input secret (set --input-secret)".to_string()),
+            Some(p) if !p.exists() && self.args.input_secret.is_none() => {
+                Err(format!("no input secret at {}", p.display()))
+            }
+            Some(p) => secure::load_secret(&p).map_err(|e| format!("{e:#}")),
+        };
+        if let Err(why) = &secret {
+            println!("note: keyboard and mouse stay on this PC: {why} (see vdview --help)");
+        }
         println!(
             "sender {addr}: requesting {}",
             if hello.width == 0 {
@@ -666,6 +897,13 @@ impl App {
             connect_error: None,
             connect_attempts: 0,
             replaced_by: None,
+            secret,
+            modifiers: self.args.modifiers,
+            input_on: true,
+            input_link: None,
+            pointer: None,
+            connected_at: Instant::now(),
+            input_silence_noted: false,
             osd_pinned: false,
             osd_until: Some(Instant::now() + OSD_SHOW),
             switching: false,
@@ -718,87 +956,37 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        logical_key,
-                        state: ElementState::Pressed,
-                        repeat: false,
-                        ..
-                    },
-                ..
-            } => match logical_key {
-                Key::Named(NamedKey::F11) => {
-                    let full = r.window.fullscreen().is_none();
-                    r.window.set_fullscreen(
-                        full.then(|| Fullscreen::Borderless(r.window.current_monitor())),
-                    );
-                    r.window.set_cursor_visible(!full);
+            WindowEvent::CursorMoved { position, .. } => r.pointer = Some((position.x, position.y)),
+            WindowEvent::MouseInput { state, button, .. } if r.forwarding() => {
+                if let Some(b) = input::button_index(button) {
+                    r.flush_pointer();
+                    let down = state == ElementState::Pressed;
+                    r.send_input(protocol::INPUT_BUTTON, &[b, down as u8]);
                 }
-                Key::Named(NamedKey::Escape) if r.window.fullscreen().is_some() => {
-                    r.window.set_fullscreen(None);
-                    r.window.set_cursor_visible(true);
+            }
+            WindowEvent::MouseWheel { delta, .. } if r.forwarding() => {
+                if let Some(body) = input::scroll_body(delta) {
+                    r.flush_pointer();
+                    r.send_input(protocol::INPUT_SCROLL, &body);
                 }
-                Key::Named(NamedKey::Enter) if r.replaced_by.is_some() => {
-                    r.replaced_by = None;
-                    println!("reconnecting (taking the sender back)");
-                    r.connect();
-                }
-                Key::Named(NamedKey::F1) => {
-                    r.osd_pinned = !r.osd_pinned;
-                    r.osd_until = None;
-                    r.update_osd();
-                }
-                Key::Named(NamedKey::F2) => {
-                    if r.hello.chroma444 {
-                        println!("4:4:4 is 8-bit only on the Mac's encoder");
-                    } else {
-                        r.hello.bit_depth = if r.hello.bit_depth == 10 { 8 } else { 10 };
-                        r.reconfigure("bit depth");
+            }
+            WindowEvent::Focused(false) => r.release_all(),
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.physical_key == PhysicalKey::Code(KeyCode::F8) {
+                    if event.state == ElementState::Pressed && !event.repeat {
+                        r.toggle_input();
                     }
+                    return;
                 }
-                Key::Named(NamedKey::F3) => {
-                    r.hello.chroma444 = !r.hello.chroma444;
-                    r.reconfigure("chroma");
+                if r.forwarding() {
+                    r.forward_key(&event);
+                    return;
                 }
-                Key::Named(NamedKey::F4) => {
-                    if r.hello.width == 0 {
-                        println!("refresh switching needs a requested mode (not --server-mode)");
-                    } else if r.refresh_choices.len() > 1 {
-                        let i = r
-                            .refresh_choices
-                            .iter()
-                            .position(|&c| c == r.hello.refresh_mhz)
-                            .unwrap_or(0);
-                        r.hello.refresh_mhz = r.refresh_choices[(i + 1) % r.refresh_choices.len()];
-                        r.reconfigure("refresh rate");
-                    }
+                if event.state != ElementState::Pressed || event.repeat {
+                    return;
                 }
-                // Same backing pixels either way (e.g. 3840x2160 1x <-> 1920x1080 HiDPI), so the
-                // pixel rate and the refresh choices stay valid.
-                Key::Named(NamedKey::F5) => {
-                    let h = &mut r.hello;
-                    if h.width == 0 {
-                        println!("HiDPI switching needs a requested mode (not --server-mode)");
-                    } else if h.hidpi {
-                        (h.width, h.height, h.hidpi) = (h.width * 2, h.height * 2, false);
-                        r.reconfigure("1x");
-                    } else if h.width % 2 == 0
-                        && h.height % 2 == 0
-                        && h.width >= 640
-                        && h.height >= 480
-                    {
-                        (h.width, h.height, h.hidpi) = (h.width / 2, h.height / 2, true);
-                        r.reconfigure("HiDPI");
-                    } else {
-                        println!(
-                            "{}x{} is too small or odd-sized for HiDPI",
-                            h.width, h.height
-                        );
-                    }
-                }
-                _ => {}
-            },
+                r.key_command(event.logical_key);
+            }
             _ => {}
         }
     }
@@ -852,6 +1040,11 @@ impl ApplicationHandler<UserEvent> for App {
                 r.replaced_by = Some(by);
                 r.update_osd();
             }
+            UserEvent::Input(g, link) if g == current => {
+                r.input_link = Some(link);
+                println!("input to the Mac: {}", r.input_label());
+                r.flash_osd();
+            }
             _ => {} // events from an older connection
         }
     }
@@ -860,6 +1053,9 @@ impl ApplicationHandler<UserEvent> for App {
         let Some(r) = self.running.as_mut() else {
             return;
         };
+        if r.forwarding() {
+            r.flush_pointer(); // at most one pointer message per turn of the event loop
+        }
         let now = Instant::now();
         if now >= r.next_stats {
             let rtt = r
@@ -870,12 +1066,22 @@ impl ApplicationHandler<UserEvent> for App {
             if r.control.is_some() {
                 println!("{line}");
                 let title = format!(
-                    "vdview {} | {line}",
-                    r.start.as_ref().map_or(String::new(), describe_start)
+                    "vdview {} | input {} | {line}",
+                    r.start.as_ref().map_or(String::new(), describe_start),
+                    r.input_label()
                 );
                 r.window.set_title(&title);
             }
             r.summary = summary;
+            if r.control.is_some()
+                && r.secret.is_ok()
+                && r.input_link.is_none()
+                && !r.input_silence_noted
+                && r.connected_at.elapsed() >= INPUT_REPLY_WITHIN
+            {
+                println!("input to the Mac: {}", r.input_label());
+                r.input_silence_noted = true;
+            }
             r.next_stats = now + STATS_EVERY;
             r.update_osd();
         }
@@ -992,6 +1198,26 @@ fn decode_test(input: &str, hwaccel: &str) -> Result<()> {
     Ok(())
 }
 
+/// `--set-input-secret [--input-secret PATH]`: saves the secret typed or piped on stdin (kept off
+/// the command line so that it does not end up in the shell's history).
+fn set_input_secret(argv: &[String]) -> Result<()> {
+    let path = match argv.iter().position(|a| a == "--input-secret") {
+        Some(i) => PathBuf::from(
+            argv.get(i + 1)
+                .ok_or_else(|| anyhow!("--input-secret needs a value"))?,
+        ),
+        None => secure::default_secret_path()
+            .ok_or_else(|| anyhow!("no default place for the secret; use --input-secret"))?,
+    };
+    eprintln!("paste the input secret (64 hex digits from make-input-secret.sh) and press Enter:");
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    let secret = secure::parse_secret(&line)?;
+    secure::save_secret(&path, &secret)?;
+    println!("saved {}", path.display());
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
     if argv.get(1).map(String::as_str) == Some("--decode-test") {
@@ -1023,6 +1249,15 @@ fn main() -> ExitCode {
             .and_then(|i| argv.get(i + 1))
             .map_or("auto", String::as_str);
         return match snapshot(input, output, hwaccel) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("vdview: {e:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if argv.get(1).map(String::as_str) == Some("--set-input-secret") {
+        return match set_input_secret(&argv) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("vdview: {e:#}");

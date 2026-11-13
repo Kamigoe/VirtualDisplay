@@ -1,7 +1,7 @@
 # VirtualDisplay
 
 Mac に仮想モニターを生やし、その画面を LAN 越しに Windows / Ubuntu へ低遅延で映す自作ツール。
-映像専用（入力の逆送はしない）。
+PC のキーボードとマウスで Mac を操作することもできる（共有シークレットで相互認証し、入力は暗号化して送る）。
 
 ```
 [Mac: vdsend]  CGVirtualDisplay → ScreenCaptureKit → VideoToolbox HEVC ─┐
@@ -121,11 +121,15 @@ vdview <MacのIP>[:port] [options]
 | `--monitor N` | 表示するモニター（起動時に一覧を表示） |
 | `--windowed` | ウィンドウで起動（F11 で全画面切替、Esc で全画面解除） |
 | `--vsync` | FIFO 表示（ティアリングなし・遅延増） |
+| `--input-secret PATH` | 入力用の共有シークレットの場所（既定：Windows `%APPDATA%vdviewinput-secret`、Ubuntu `~/.config/vdview/input-secret`） |
+| `--map-ctrl` / `--map-alt` / `--map-win ROLE` | PC の Ctrl / Alt / Windows キーを Mac の何にするか：`cmd` / `ctrl` / `alt` / `shift` / `none`（既定 Ctrl→Command、Alt→Option、Win→Control） |
 
-表示中のキー操作（入力は Mac に送らないので、PC 側のキーボードで操作する）：
+表示中のキー操作。**入力の転送が ON の間は、F8 以外のキーはすべて Mac に送られる**ので、
+下の F1〜F5・F11・Esc・Enter は F8 で転送を OFF にしてから使う（シークレットがなく転送できないときは常に効く）：
 
 | キー | 動作 |
 |---|---|
+| F8 | Mac への入力の転送 ON / OFF（起動時は ON） |
 | F1 | 状態表示（左上）の常時表示 / 非表示 |
 | F2 | 8bit ⇔ 10bit |
 | F3 | 4:2:0 ⇔ 4:4:4（AMD GPU では 4:4:4 は CPU デコード。9950X3D で UWQHD 約 3ms） |
@@ -141,6 +145,24 @@ fps / 表示 fps / ビットレート / 遅延（Mac で描画 → PC で表示�
 （例：4K 144Hz → 60Hz、UWQHD 144Hz → 120Hz）。また 120Hz を上限とする：macOS は 240Hz の仮想モニターも作れるが、
 画面の取り込みが 120〜180Hz で約 110fps、240Hz では約 55fps しか出なかったため（`docs/roadmap.md`）。
 `--mode` で指定した場合は上限をかけない（試験用）。
+
+### 入力（キーボード・マウス）
+
+`vdview` の画面を見ながら、PC のキーボードとマウスで Mac を操作する。mac-input-cast の後継。
+
+1. Mac：`mac-sender/scripts/make-input-secret.sh` でシークレットを作り、表示された 16 進 64 文字を控える。
+2. Mac：初回のみ `open -a ~/Library/VirtualDisplay/vdsend.app --args --request-permission` を実行し、
+   システム設定 > プライバシーとセキュリティ > **アクセシビリティ** で vdsend をオンにする（イベントの送信に必要）。
+3. PC：`vdview --set-input-secret` を実行し、控えた 64 文字を貼り付けて Enter。
+4. `vdview` を起動すると、自動で認証して転送が ON になる。状態はウィンドウタイトルと左上の `INPUT …` に出る。
+
+- キーは**位置**で送る（Mac 側の JIS 配列と日本語入力がそのまま効く）。無変換・英数 → 英数、変換・ひらがな・かな → かな、
+  半角/全角 → 英数 ⇔ かな の切り替え。
+- マウスは絶対位置。`vdview` に映っている位置が、そのまま Mac の仮想モニター上の位置になる（HiDPI でも等倍でも）。
+- 転送を OFF にしたとき・ウィンドウが前面でなくなったとき・接続が切れたときは、押されているキーとボタンを Mac 側で離す。
+- 認証：両側が同じシークレットを持つことを毎回確かめ合う（シークレット自体は通信に流さない）。
+  鍵は接続ごとに X25519 で作り直し、入力は ChaCha20-Poly1305 で暗号化する。映像は暗号化しない。仕様は `docs/protocol.md`。
+- まだできないこと：Windows キーと Alt+Tab は Windows が先に処理する（次の段階で対応予定）。Ctrl+Alt+Del は送れない。
 
 ### 自己テスト
 
@@ -164,6 +186,7 @@ mac-sender/scripts/install.sh            # 既定の引数: --mode 3440x1440@60 
   署名は固定の自己署名証明書（`make-signing-identity.sh`）なので、再ビルドしても画面収録の許可が外れない。
 - 初回のみ：`open -a ~/Library/VirtualDisplay/vdsend.app --args --request-permission` を実行し、
   システム設定 > プライバシーとセキュリティ > 画面収録とシステムオーディオ録音 で vdsend をオンにする。
+  PC から操作する場合は、同じ画面の「アクセシビリティ」でも vdsend をオンにする（`--check-permission` で両方を確認できる）。
 - 更新：同じ `install.sh` を再実行（動いていたエージェントは自動で再起動）。削除：`uninstall.sh`。
 - ログ：`~/Library/Logs/vdsend.log`、Wi-Fi 関連は `~/Library/Logs/vdsend-wifi.log`。
 

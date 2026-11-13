@@ -13,6 +13,25 @@ pub const MSG_PONG: u8 = 0x05;
 pub const MSG_REPLACED: u8 = 0x06;
 pub const MSG_ERROR: u8 = 0x7F;
 
+// Input (docs/protocol.md, "Input"): handshake in the clear, then everything inside Secure.
+pub const MSG_AUTH_HELLO: u8 = 0x10;
+pub const MSG_AUTH_CHALLENGE: u8 = 0x11;
+pub const MSG_AUTH_CONFIRM: u8 = 0x12;
+pub const MSG_AUTH_RESULT: u8 = 0x13;
+pub const MSG_SECURE: u8 = 0x30;
+
+pub const INPUT_KEY: u8 = 0x20;
+pub const INPUT_IME_TOGGLE: u8 = 0x21;
+pub const INPUT_POINTER: u8 = 0x22;
+pub const INPUT_BUTTON: u8 = 0x23;
+pub const INPUT_SCROLL: u8 = 0x24;
+pub const INPUT_RELEASE_ALL: u8 = 0x25;
+pub const INPUT_STATUS: u8 = 0x40;
+
+pub const AUTH_OK: u8 = 0;
+pub const AUTH_FAILED: u8 = 1;
+pub const AUTH_NO_SECRET: u8 = 2;
+
 pub const VIDEO_MAGIC: u8 = 0x56;
 pub const KEEPALIVE_MAGIC: u8 = 0x4B;
 pub const NACK_MAGIC: u8 = 0x4E;
