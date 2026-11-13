@@ -50,7 +50,9 @@ mac-input-cast（Python。Windows → Mac の入力キャスト）を置き換�
 
 1. 通信・認証・暗号化と、キーボード・マウスの基本。Windows で試験。
 2. Windows のキーボードフック（D2）、Ubuntu での試験。
-3. mac-input-cast を役目終了にする（README で案内）。
+3. mac-input-cast を役目終了にする（README で案内）。→ 2026-11-13 完了：mac-input-cast の README の冒頭に、
+   後継が VirtualDisplay であること・違いの表・移行の手順（同時に動かさない）を書いた。VirtualDisplay の README にも
+   置き換えた旨を書いた。
 
 ## キーボード
 

@@ -148,7 +148,9 @@ fps / 表示 fps / ビットレート / 遅延（Mac で描画 → PC で表示�
 
 ### 入力（キーボード・マウス）
 
-`vdview` の画面を見ながら、PC のキーボードとマウスで Mac を操作する。mac-input-cast の後継。
+`vdview` の画面を見ながら、PC のキーボードとマウスで Mac を操作する。mac-input-cast の後継
+（2026-11-13 に置き換え。F8、キーの送り方、IME の切り替え、`--map-*` の既定は同じ。mac-input-cast の `sender.py` /
+`receiver.py` とは同時に動かさない。どちらも F8 で入力を横取りするため）。
 
 1. Mac：`mac-sender/scripts/make-input-secret.sh` でシークレットを作り、表示された 16 進 64 文字を控える。
 2. Mac：初回のみ `open -a ~/Library/VirtualDisplay/vdsend.app --args --request-permission` を実行し、

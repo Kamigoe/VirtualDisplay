@@ -121,6 +121,7 @@
    高解像度での転送時間の仮説の確認は残り）
 2. 入力の統合（mac-input-cast の機能を vdview / vdsend へ。認証を含む）。2026-11-13 フェーズ 1
    （認証・暗号化、キーボード・マウス）を実装し、Windows で動作を確認。同日フェーズ 2 の Windows 分（Windows キーと
-   Alt+Tab などの横取り）も完了。Ubuntu での試験とフェーズ 3（mac-input-cast の役目終了）が残り。詳細は `docs/input-plan.md`
+   Alt+Tab などの横取り）とフェーズ 3（mac-input-cast の役目終了の案内）も完了。Ubuntu での試験が残り。
+   詳細は `docs/input-plan.md`
 3. ローカルでのカーソル描画、テキストのクリップボード共有
 4. D&D・画面端でのカーソル移動
