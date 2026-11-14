@@ -100,3 +100,7 @@ Windows 側のセッションから Mac 側のセッションへの引き継ぎ�
     Win キーを Mac の Control にしている既定では、Mac の Control の組み合わせが使えない。フェーズ 2
     （`docs/input-plan.md` の D2、低レベルのキーボードフック）で対応する想定どおりの制約。
   - Mac 側のログ（`input: ... authenticated`）は未確認。
+- 2026-11-14 Mac 側で手順 9 のログを確認：Windows（`192.168.11.12` と IPv6 リンクローカル）からの接続はすべて
+  `input: <接続元> authenticated` で、`accessibility permission missing` は付いていない（＝アクセシビリティの許可あり）。
+  なお、エージェントの vdsend が動いている間は `open -a vdsend.app --args --check-permission` が
+  LaunchServices のエラー -600 で起動できない。許可の確認は上のログで代用できる。
