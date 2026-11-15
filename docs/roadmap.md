@@ -124,5 +124,6 @@
    Alt+Tab などの横取り）とフェーズ 3（mac-input-cast の役目終了の案内）も完了。2026-11-16 Ubuntu（Wayland・GNOME）で
    試験し、Super・Alt+Tab などの横取り（keyboard-shortcuts-inhibit）も実装して完了。X11 のセッションは未対応・未試験。
    詳細は `docs/input-plan.md`
-3. ローカルでのカーソル描画、テキストのクリップボード共有
+3. ローカルでのカーソル描画、テキストのクリップボード共有。2026-11-16 設計し、Windows 側と Mac 側を実装
+   （Mac でのビルドと試験はこれから）。詳細は `docs/share-plan.md`
 4. D&D・画面端でのカーソル移動

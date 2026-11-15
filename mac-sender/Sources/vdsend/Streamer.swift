@@ -15,6 +15,9 @@ final class Streamer {
     private var encoder: Encoder?
     private var viewers = Set<String>()
     private var recovering = false
+    /// The cursor goes into the video; false while the viewer draws it itself.
+    private var wantCursor = true
+    private var updatingCursor = false
     /// Held while someone is watching: keeps the displays awake and the process out of App Nap.
     private var watchActivity: NSObjectProtocol?
 
@@ -59,6 +62,20 @@ final class Streamer {
 
     func requestKeyframe() {
         encoder?.requestKeyframe()
+    }
+
+    /// Puts the cursor into the video or leaves it out (applied to the running capture, and to
+    /// any capture started later). The last call wins, even while an earlier one is applied.
+    func setShowsCursor(_ on: Bool) {
+        wantCursor = on
+        guard !updatingCursor else { return }
+        updatingCursor = true
+        Task {
+            while let cap = capture, cap.showsCursor != wantCursor {
+                await cap.setShowsCursor(wantCursor)
+            }
+            updatingCursor = false
+        }
     }
 
     /// Call before `apply` when a viewer attaches.
@@ -110,9 +127,10 @@ final class Streamer {
                 await self.recover()
             }
         })
-        try await cap.start(displayID: display!.displayID, options: o)
+        try await cap.start(displayID: display!.displayID, options: o, showsCursor: wantCursor)
         encoder = enc
         capture = cap
+        setShowsCursor(wantCursor) // in case it changed while starting
         // The last viewer may have left while we were awaiting (actor reentrancy).
         if viewers.isEmpty { await stopPipeline() }
     }

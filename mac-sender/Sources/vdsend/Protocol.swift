@@ -28,7 +28,11 @@ enum Proto {
         case button = 0x23
         case scroll = 0x24
         case releaseAll = 0x25
+        case cursorMode = 0x26
+        case clipboardMode = 0x27
         case status = 0x40
+        case cursorShape = 0x41
+        case clipText = 0x50 // both directions
     }
 
     enum AuthStatus: UInt8 {

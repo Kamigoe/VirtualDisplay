@@ -12,6 +12,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::clock::{ClockSync, now_us};
 use crate::protocol::{self, Hello, Start};
+use crate::clipboard::{self, Assembler};
+use crate::cursor::Shape;
 use crate::secure::{ClientHandshake, Sealer};
 
 /// Why the control connection ended.
@@ -20,6 +22,17 @@ pub enum Closed {
     Lost(String),
     /// The sender switched to another viewer (named here); reconnecting would just take it back.
     Replaced(String),
+}
+
+/// What the Mac said on the input channel.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MacEvent {
+    /// The input channel changed state.
+    Link(InputLink),
+    /// The Mac's cursor picture changed (while vdview draws the cursor).
+    Cursor(Shape),
+    /// Text copied on the Mac (LF line ends).
+    Clipboard(String),
 }
 
 /// State of the input channel, reported as it changes.
@@ -49,13 +62,13 @@ impl Control {
     /// Connects, sends Hello and waits for Start. Spawns a reader thread for Pong/Start/Error;
     /// `on_restart` runs there for each later Start (after `reconfigure`), `on_closed` when the
     /// sender goes away. With a `secret`, also starts the input handshake; `on_input` reports
-    /// its outcome and later permission changes.
+    /// its outcome and later permission changes, and the Mac's cursor and clipboard as they come.
     pub fn connect(
         addr: SocketAddr,
         hello: &Hello,
         secret: Option<[u8; 32]>,
         on_restart: impl Fn(Start) + Send + 'static,
-        on_input: impl Fn(InputLink) + Send + 'static,
+        on_mac: impl Fn(MacEvent) + Send + 'static,
         on_closed: impl FnOnce(Closed) + Send + 'static,
     ) -> Result<(Arc<Control>, Start)> {
         let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
@@ -95,6 +108,7 @@ impl Control {
         }
         let mut confirming = None;
         let mut opener = None;
+        let mut clip = Assembler::default();
         let ctl = control.clone();
 
         let clock = control.clock.clone();
@@ -134,7 +148,7 @@ impl Control {
                                     ctl.send(protocol::MSG_AUTH_CONFIRM, &confirm);
                                     confirming = Some(channel);
                                 }
-                                Err(e) => on_input(InputLink::Failed(format!("{e:#}"))),
+                                Err(e) => on_mac(MacEvent::Link(InputLink::Failed(format!("{e:#}")))),
                             }
                         }
                         Ok((protocol::MSG_AUTH_RESULT, body)) => {
@@ -143,7 +157,7 @@ impl Control {
                                     *ctl.sealer.lock().unwrap() = Some(channel.tx);
                                     opener = Some(channel.rx);
                                 }
-                                (status, _) => on_input(InputLink::Failed(
+                                (status, _) => on_mac(MacEvent::Link(InputLink::Failed(
                                     match status {
                                         Some(protocol::AUTH_FAILED) => {
                                             "the Mac has a different input secret"
@@ -154,15 +168,24 @@ impl Control {
                                         _ => "the Mac rejected the input handshake",
                                     }
                                     .to_string(),
-                                )),
+                                ))),
                             }
                         }
                         Ok((protocol::MSG_SECURE, body)) => {
                             let Some(rx) = opener.as_mut() else { continue };
                             match rx.open(&body) {
-                                Ok((protocol::INPUT_STATUS, b)) => on_input(InputLink::Ready {
+                                Ok((protocol::INPUT_STATUS, b)) => on_mac(MacEvent::Link(InputLink::Ready {
                                     permitted: b.first().is_some_and(|f| f & 1 != 0),
-                                }),
+                                })),
+                                Ok((protocol::INPUT_CURSOR_SHAPE, b)) => match Shape::decode(&b) {
+                                    Ok(s) => on_mac(MacEvent::Cursor(s)),
+                                    Err(e) => eprintln!("cursor: {e:#}"),
+                                },
+                                Ok((protocol::INPUT_CLIP_TEXT, b)) => {
+                                    if let Some(text) = clip.push(&b) {
+                                        on_mac(MacEvent::Clipboard(text));
+                                    }
+                                }
                                 Ok(_) => {}
                                 Err(e) => break Closed::Lost(format!("{e:#}")),
                             }
@@ -205,6 +228,17 @@ impl Control {
         let sealed = s.seal(inner, body);
         self.send(protocol::MSG_SECURE, &sealed);
         true
+    }
+
+    /// Sends text copied here to the Mac's clipboard, in pieces (other input can go in between).
+    /// False when it is too long or the input channel is not ready.
+    pub fn send_clipboard(&self, text: &str) -> bool {
+        let Some(parts) = clipboard::chunks(text) else {
+            return false;
+        };
+        parts
+            .iter()
+            .all(|p| self.send_input(protocol::INPUT_CLIP_TEXT, p))
     }
 
     fn send(&self, kind: u8, body: &[u8]) {

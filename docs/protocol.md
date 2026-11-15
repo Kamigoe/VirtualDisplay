@@ -146,6 +146,32 @@ client_mac = HMAC(k_auth, "client" ‖ th)
 送信側が押されている修飾キーからフラグを組み立てる。送信側は接続が切れたとき、または受信側が入れ替わったときも、
 押されているものをすべて離す。
 
+### カーソルとクリップボード（Secure の中）
+
+設計の経緯は `docs/share-plan.md`。どれも握手が成功した接続だけで使う。知らない内側の type は無視するので、
+古い送信側・受信側と組み合わせても今までどおり動く（カーソルは映像に焼き込まれたまま、クリップボードは共有しない）。
+
+| 内側の type | 向き | body |
+|---|---|---|
+| 0x26 CursorMode | C→S | u8 `local`：1 = 受信側がカーソルを描く（送信側は映像にカーソルを入れず、CursorShape を送る）、0 = 映像に入れる（既定） |
+| 0x27 ClipboardMode | C→S | u8 `on`：1 = 送信側でコピーされたテキストを ClipText で送ってほしい（既定 0） |
+| 0x41 CursorShape | S→C | u16 `width` ‖ u16 `height` ‖ u16 `hot_x` ‖ u16 `hot_y` ‖ RGBA（`width × height × 4` バイト） |
+| 0x50 ClipText | 両方向 | u32 `total` ‖ u32 `offset` ‖ UTF-8 のテキストの一部 |
+
+- CursorShape：仮想モニターの**ピクセル**単位（HiDPI なら 2 倍の大きさ）。RGBA は sRGB、**乗算済みでない**アルファ、
+  上の行から。幅・高さは 120 以下（大きいカーソルは送信側が縮める）。0 × 0 は「カーソルを隠している」。
+  ホットスポット（クリック位置）は左上が原点。送信側は CursorMode 1 を受けたらすぐに 1 回、以後は形が変わるたびに送る。
+  受信側は映像の拡大率に合わせて拡大・縮小し、自分のマウスカーソルとして表示する。
+- 受信側は転送が ON の間 CursorMode 1、OFF にしたら 0 を送る。送信側は接続が切れたとき・受信側が入れ替わったときに 0 に戻す。
+- ClipText：1 つのテキストを `offset` の順に分けて送る（1 通の中身は 60000 バイト以下）。`total` は 1 以上
+  1 MiB（1048576）以下。`offset` 0 で新しいテキストが始まる。順番が飛んだら、組み立て中のテキストは捨てる。
+  改行は LF。
+- 送るのは、その後にコピーされたテキストだけ（つないだ時点・ClipboardMode を受けた時点の中身は送らない）。
+  受け取ったテキストをクリップボードに入れたことによる変化は送り返さない。
+  パスワード管理ソフトなどが「共有しない」印を付けた内容は送らない（Mac：`org.nspasteboard.ConcealedType`・
+  `org.nspasteboard.TransientType`、Windows：`ExcludeClipboardContentFromMonitorProcessing`・`Clipboard Viewer Ignore`）。
+- 受信側 → 送信側の ClipText は ClipboardMode とは関係なく、受信側の設定（`--no-clipboard` でなければ）で送る。
+
 ## 映像パケット (UDP, S→C)
 
 1 フレーム（HEVC の 1 アクセスユニット、Annex-B）を固定長チャンクに分割して送る。

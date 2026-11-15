@@ -1,7 +1,11 @@
 //! vdview: shows a VirtualDisplay stream from a Mac running `vdsend`.
 
+mod clipboard;
+#[cfg(windows)]
+mod clipwin;
 mod clock;
 mod control;
+mod cursor;
 mod decoder;
 mod input;
 mod osd;
@@ -30,10 +34,10 @@ use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::monitor::MonitorHandle;
-use winit::window::{Fullscreen, Window, WindowId};
+use winit::window::{CursorIcon, CustomCursor, Fullscreen, Window, WindowId};
 
 use crate::clock::now_us;
-use crate::control::{Closed, Control, InputLink};
+use crate::control::{Closed, Control, InputLink, MacEvent};
 use crate::decoder::Decoder;
 use crate::input::{MacKey, Modifiers, Role};
 use crate::protocol::{Hello, Start};
@@ -63,6 +67,7 @@ input (keyboard and mouse to the Mac; needs the same secret on both sides, see R
   --map-ctrl ROLE       what Ctrl is on the Mac: cmd | ctrl | alt | shift | none (default cmd)
   --map-alt ROLE        what Alt is on the Mac (default alt = Option)
   --map-win ROLE        what the Windows key is on the Mac (default ctrl)
+  --no-clipboard        do not share the text clipboard with the Mac (shared both ways by default)
   vdview --set-input-secret [--input-secret PATH]
       read the secret (64 hex digits, as printed by make-input-secret.sh) from standard input
       and save it
@@ -71,6 +76,7 @@ keys while running:
   F8  input to the Mac on/off (starts on). While on, every other key goes to the Mac, so the
       keys below work only while it is off. On Windows this includes the Windows key, Alt+Tab,
       Alt+F4 and Ctrl+Esc while vdview is in front (a role of none leaves that key to Windows).
+      While on, the Mac's cursor is drawn as this PC's own cursor (no video delay).
   F2  8-bit <-> 10-bit      F3  4:2:0 <-> 4:4:4      F4  cycle refresh rate (max / 120 / 60 Hz)
   F5  HiDPI (2x) <-> 1x     F11 fullscreen on/off     Esc leave fullscreen
 
@@ -105,6 +111,7 @@ struct Args {
     vsync: bool,
     input_secret: Option<PathBuf>,
     modifiers: Modifiers,
+    clipboard: bool,
 }
 
 impl Args {
@@ -126,6 +133,7 @@ impl Args {
             vsync: false,
             input_secret: None,
             modifiers: Modifiers::default(),
+            clipboard: true,
         };
         while let Some(arg) = it.next() {
             let mut value = || it.next().ok_or_else(|| anyhow!("{arg} needs a value"));
@@ -174,6 +182,7 @@ impl Args {
                 "--map-ctrl" => a.modifiers.ctrl = Role::parse(&value()?)?,
                 "--map-alt" => a.modifiers.alt = Role::parse(&value()?)?,
                 "--map-win" => a.modifiers.win = Role::parse(&value()?)?,
+                "--no-clipboard" => a.clipboard = false,
                 "-h" | "--help" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -274,8 +283,10 @@ enum UserEvent {
     Restarted(u64, Start),
     /// The connection of generation `gen` ended.
     Closed(u64, Closed),
-    /// The input channel of generation `gen` changed state.
-    Input(u64, InputLink),
+    /// The Mac said something on the input channel of generation `gen`.
+    Mac(u64, MacEvent),
+    /// Text was copied on this PC.
+    Copied(String),
 }
 
 fn describe_start(s: &Start) -> String {
@@ -294,6 +305,19 @@ const RECONNECT_EVERY: Duration = Duration::from_secs(2);
 const STATS_EVERY: Duration = Duration::from_secs(1);
 /// A sender that has not answered the input handshake by then is too old to know it.
 const INPUT_REPLY_WITHIN: Duration = Duration::from_secs(3);
+
+/// What the window's cursor shows.
+#[derive(Clone, Copy, PartialEq)]
+enum CursorState {
+    /// The usual arrow (the Mac's cursor is in the video).
+    Arrow { visible: bool },
+    /// The Mac's cursor picture number `shape`, at `scale_64` / 64 window pixels per Mac pixel.
+    Mac {
+        shape: u64,
+        hidden: bool,
+        scale_64: u32,
+    },
+}
 
 /// The window and renderer live for the whole run; connections come and go underneath them.
 struct Running {
@@ -335,6 +359,17 @@ struct Running {
     connected_at: Instant,
     /// The console already said that the sender did not answer the input handshake.
     input_silence_noted: bool,
+    /// CursorMode last sent on this connection: the Mac leaves its cursor out of the video and
+    /// vdview shows it as its own cursor (while forwarding).
+    cursor_local: bool,
+    /// The Mac's cursor picture, and a counter that changes with it.
+    mac_cursor: Option<(u64, cursor::Shape)>,
+    /// What the OS cursor was last set to (see `update_cursor`).
+    cursor_applied: Option<CursorState>,
+    /// The text clipboard shared with the Mac (None with --no-clipboard or if it cannot be watched).
+    clipboard: Option<clipboard::Clipboard>,
+    /// ClipboardMode was sent on this connection (the Mac then sends its copies).
+    clipboard_mode_sent: bool,
     /// Takes the Windows key and Alt from Windows while forwarding (see `winhook`).
     #[cfg(windows)]
     hook: Option<winhook::Hook>,
@@ -374,8 +409,8 @@ impl Running {
                         move |s| {
                             let _ = restart_proxy.send_event(UserEvent::Restarted(generation, s));
                         },
-                        move |link| {
-                            let _ = input_proxy.send_event(UserEvent::Input(generation, link));
+                        move |ev| {
+                            let _ = input_proxy.send_event(UserEvent::Mac(generation, ev));
                         },
                         move |reason| {
                             let _ = close_proxy.send_event(UserEvent::Closed(generation, reason));
@@ -434,6 +469,7 @@ impl Running {
         self.input_link = None;
         self.connected_at = Instant::now();
         self.input_silence_noted = false;
+        self.reset_mac_modes();
         Ok(())
     }
 
@@ -444,6 +480,7 @@ impl Running {
             c.shutdown();
         }
         self.input_link = None;
+        self.reset_mac_modes();
     }
 
     /// Keyboard and mouse currently go to the Mac.
@@ -464,6 +501,97 @@ impl Running {
         if self.forwarding() {
             self.send_input(protocol::INPUT_RELEASE_ALL, &[]);
         }
+    }
+
+    /// A new connection: the Mac starts with its cursor in the video and keeps its clipboard.
+    fn reset_mac_modes(&mut self) {
+        self.cursor_local = false;
+        self.mac_cursor = None;
+        self.cursor_applied = None;
+        self.clipboard_mode_sent = false;
+    }
+
+    /// Tells the Mac who draws the cursor (vdview while forwarding) and that vdview wants its
+    /// clipboard. Senders that predate these messages ignore them.
+    fn sync_mac_modes(&mut self) {
+        if self.control.is_none() || !matches!(self.input_link, Some(InputLink::Ready { .. })) {
+            return;
+        }
+        let local = self.forwarding();
+        if local != self.cursor_local {
+            self.cursor_local = local;
+            self.send_input(protocol::INPUT_CURSOR_MODE, &[local as u8]);
+        }
+        if self.clipboard.is_some() && !self.clipboard_mode_sent {
+            self.clipboard_mode_sent = true;
+            self.send_input(protocol::INPUT_CLIPBOARD_MODE, &[1]);
+        }
+    }
+
+    /// Shows the Mac's cursor as the window's cursor while the Mac leaves it out of the video;
+    /// otherwise the usual arrow, hidden in fullscreen (the Mac's cursor is in the picture).
+    fn update_cursor(&mut self, el: &ActiveEventLoop) {
+        let full = self.window.fullscreen().is_some();
+        let state = match (&self.mac_cursor, self.cursor_local, &self.start) {
+            (Some((n, shape)), true, Some(s)) => {
+                let size = self.window.inner_size();
+                let scale = cursor::video_scale(
+                    (size.width, size.height),
+                    (s.pixel_width, s.pixel_height),
+                );
+                CursorState::Mac {
+                    shape: *n,
+                    hidden: shape.hidden(),
+                    // Finer steps would rebuild the cursor for nothing.
+                    scale_64: (scale * 64.0).round() as u32,
+                }
+            }
+            _ => CursorState::Arrow { visible: !full },
+        };
+        if self.cursor_applied == Some(state) {
+            return;
+        }
+        self.cursor_applied = Some(state);
+        match state {
+            CursorState::Arrow { visible } => {
+                self.window.set_cursor(CursorIcon::Default);
+                self.window.set_cursor_visible(visible);
+            }
+            CursorState::Mac { hidden: true, .. } => self.window.set_cursor_visible(false),
+            CursorState::Mac { scale_64, .. } => {
+                let Some((_, shape)) = &self.mac_cursor else {
+                    return;
+                };
+                let c = shape.scaled(scale_64 as f64 / 64.0);
+                match CustomCursor::from_rgba(c.rgba, c.width, c.height, c.hot_x, c.hot_y) {
+                    Ok(source) => {
+                        self.window.set_cursor(el.create_custom_cursor(source));
+                        self.window.set_cursor_visible(true);
+                    }
+                    Err(e) => eprintln!("cursor: {e}"),
+                }
+            }
+        }
+    }
+
+    /// Text copied on this PC goes to the Mac's clipboard (on a separate thread: up to 1 MiB).
+    fn send_clipboard(&self, text: String) {
+        let Some(c) = self.control.clone() else {
+            return;
+        };
+        if !self.clipboard_mode_sent {
+            return; // not authenticated (yet)
+        }
+        if text.len() > clipboard::MAX_TEXT {
+            println!(
+                "clipboard: {} KiB of text is over the 1 MiB limit; not sent to the Mac",
+                text.len() / 1024
+            );
+            return;
+        }
+        let _ = thread::Builder::new()
+            .name("clipboard-send".into())
+            .spawn(move || c.send_clipboard(&text));
     }
 
     /// Sends the latest pointer position, if it changed.
@@ -651,11 +779,9 @@ impl Running {
                 r.window.set_fullscreen(
                     full.then(|| Fullscreen::Borderless(r.window.current_monitor())),
                 );
-                r.window.set_cursor_visible(!full);
             }
             Key::Named(NamedKey::Escape) if r.window.fullscreen().is_some() => {
                 r.window.set_fullscreen(None);
-                r.window.set_cursor_visible(true);
             }
             Key::Named(NamedKey::Enter) if r.replaced_by.is_some() => {
                 r.replaced_by = None;
@@ -893,8 +1019,15 @@ impl App {
         #[cfg(windows)]
         el.listen_device_events(winit::event_loop::DeviceEvents::Never);
         let window = Arc::new(el.create_window(attrs)?);
-        window.set_cursor_visible(self.args.windowed); // the Mac's cursor is part of the picture
         let (renderer, uploader) = Renderer::new(window.clone(), self.args.vsync)?;
+        let clipboard = if self.args.clipboard {
+            let proxy = self.proxy.clone();
+            clipboard::Clipboard::start(move |text| {
+                let _ = proxy.send_event(UserEvent::Copied(text));
+            })
+        } else {
+            None
+        };
 
         let mut refresh_choices = vec![max_refresh, 120_000, 60_000, hello.refresh_mhz];
         refresh_choices.retain(|&r| r <= max_refresh);
@@ -938,6 +1071,11 @@ impl App {
             pointer: None,
             connected_at: Instant::now(),
             input_silence_noted: false,
+            cursor_local: false,
+            mac_cursor: None,
+            cursor_applied: None,
+            clipboard,
+            clipboard_mode_sent: false,
             #[cfg(windows)]
             hook,
             #[cfg(target_os = "linux")]
@@ -1078,11 +1216,21 @@ impl ApplicationHandler<UserEvent> for App {
                 r.replaced_by = Some(by);
                 r.update_osd();
             }
-            UserEvent::Input(g, link) if g == current => {
+            UserEvent::Mac(g, MacEvent::Link(link)) if g == current => {
                 r.input_link = Some(link);
                 println!("input to the Mac: {}", r.input_label());
                 r.flash_osd();
             }
+            UserEvent::Mac(g, MacEvent::Cursor(shape)) if g == current => {
+                let n = r.mac_cursor.as_ref().map_or(0, |(n, _)| n + 1);
+                r.mac_cursor = Some((n, shape));
+            }
+            UserEvent::Mac(g, MacEvent::Clipboard(text)) if g == current => {
+                if let Some(c) = &r.clipboard {
+                    c.set(text);
+                }
+            }
+            UserEvent::Copied(text) => r.send_clipboard(text),
             _ => {} // events from an older connection
         }
     }
@@ -1106,6 +1254,8 @@ impl ApplicationHandler<UserEvent> for App {
                 s.update(forwarding);
             }
         }
+        r.sync_mac_modes();
+        r.update_cursor(el);
         if r.forwarding() {
             r.flush_pointer(); // at most one pointer message per turn of the event loop
         }

@@ -26,7 +26,12 @@ pub const INPUT_POINTER: u8 = 0x22;
 pub const INPUT_BUTTON: u8 = 0x23;
 pub const INPUT_SCROLL: u8 = 0x24;
 pub const INPUT_RELEASE_ALL: u8 = 0x25;
+pub const INPUT_CURSOR_MODE: u8 = 0x26;
+pub const INPUT_CLIPBOARD_MODE: u8 = 0x27;
 pub const INPUT_STATUS: u8 = 0x40;
+pub const INPUT_CURSOR_SHAPE: u8 = 0x41;
+/// Both directions.
+pub const INPUT_CLIP_TEXT: u8 = 0x50;
 
 pub const AUTH_OK: u8 = 0;
 pub const AUTH_FAILED: u8 = 1;

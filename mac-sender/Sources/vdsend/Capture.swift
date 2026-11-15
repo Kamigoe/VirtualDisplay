@@ -8,6 +8,9 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private let queue = DispatchQueue(label: "vdsend.capture", qos: .userInteractive)
     private var stream: SCStream?
+    private var config: SCStreamConfiguration?
+    /// The Mac's cursor is drawn into the video (off while the viewer draws it itself).
+    private(set) var showsCursor = true
     private let onFrame: FrameHandler
     private let onStopped: (Capture, Error) -> Void
 
@@ -16,7 +19,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         self.onStopped = onStopped
     }
 
-    func start(displayID: CGDirectDisplayID, options o: Options) async throws {
+    func start(displayID: CGDirectDisplayID, options o: Options, showsCursor: Bool) async throws {
         var display: SCDisplay?
         // A freshly created virtual display can take a moment to show up in shareable content.
         for _ in 0..<50 {
@@ -33,7 +36,8 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         cfg.width = o.pixelWidth
         cfg.height = o.pixelHeight
         cfg.scalesToFit = false
-        cfg.showsCursor = true
+        cfg.showsCursor = showsCursor
+        self.showsCursor = showsCursor
         cfg.capturesAudio = false
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(o.refresh.rounded()))
         cfg.queueDepth = 5
@@ -48,6 +52,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await s.startCapture()
         stream = s
+        config = cfg
         log("capture started: \(o.pixelWidth)x\(o.pixelHeight) @ \(o.refresh) Hz, \(fourCC(cfg.pixelFormat))")
     }
 
@@ -65,6 +70,19 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     func stop() async {
         try? await stream?.stopCapture()
         stream = nil
+    }
+
+    /// Puts the cursor into the video or leaves it out, without restarting the capture.
+    func setShowsCursor(_ on: Bool) async {
+        showsCursor = on
+        guard let stream, let cfg = config else { return }
+        cfg.showsCursor = on
+        do {
+            try await stream.updateConfiguration(cfg)
+            log("capture: cursor \(on ? "drawn into the video" : "left out (the viewer draws it)")")
+        } catch {
+            log("capture: cannot change the cursor setting: \(error.localizedDescription)")
+        }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {

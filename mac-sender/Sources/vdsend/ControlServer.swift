@@ -26,6 +26,8 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
     private let injector: Injector
     /// Last accessibility state reported to the viewer.
     private var reportedPermission: Bool?
+    /// Cursor and clipboard for the authenticated viewer (main thread; see `onShare`).
+    private var share: DesktopShare!
 
     /// A viewer that vanished without closing (Wi-Fi drop) is dropped after this long.
     private static let viewerTimeout: UInt64 = 6_000_000 // µs
@@ -34,6 +36,7 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
     private static let keyframeRequestInterval: UInt64 = 100_000 // µs
     private static let maxMessage = 64 * 1024
 
+    @MainActor
     init(port: UInt16, streamer: Streamer, video: VideoSender, displayID: CGDirectDisplayID) throws {
         self.streamer = streamer
         self.video = video
@@ -43,6 +46,9 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
         let params = NWParameters(tls: nil, tcp: tcp)
         params.allowLocalEndpointReuse = true
         listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
+        share = DesktopShare(streamer: streamer) { [weak self] inner, body in
+            self?.queue.async { self?.sendSecure(inner, body) }
+        }
         listener.stateUpdateHandler = { state in
             switch state {
             case .ready: log("control listening on tcp port \(port)")
@@ -225,6 +231,7 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
     /// Forgets the viewer's authentication and lets go of anything it still held.
     private func resetInput() {
         if case .ready = auth { injector.releaseAll() }
+        if case .ready = auth { onShare { $0.reset() } }
         auth = .idle
         reportedPermission = nil
     }
@@ -275,13 +282,25 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
 
     /// Tells the viewer whether events can be injected, when that is new or changed.
     private func sendInputStatus() {
-        guard let c = client, case .ready(let opener, var sealer) = auth else { return }
+        guard client != nil, case .ready = auth else { return }
         let permitted = Injector.permitted
         guard permitted != reportedPermission else { return }
         reportedPermission = permitted
-        let sealed = sealer.seal(Proto.Input.status.rawValue, Data([permitted ? 1 : 0]))
+        sendSecure(Proto.Input.status.rawValue, Data([permitted ? 1 : 0]))
+    }
+
+    /// Sends one message inside Secure to the authenticated viewer (dropped if there is none).
+    private func sendSecure(_ inner: UInt8, _ body: Data) {
+        guard let c = client, case .ready(let opener, var sealer) = auth else { return }
+        let sealed = sealer.seal(inner, body)
         auth = .ready(opener: opener, sealer: sealer)
         send(.secure, sealed, to: c)
+    }
+
+    /// Runs `f` on the main thread, in the order the viewer's messages arrived.
+    private func onShare(_ f: @escaping @MainActor (DesktopShare) -> Void) {
+        let share = self.share!
+        DispatchQueue.main.async { MainActor.assumeIsolated { f(share) } }
     }
 
     private func handleSecure(_ body: Data, from c: NWConnection) {
@@ -312,7 +331,16 @@ final class ControlServer: @unchecked Sendable { // state is confined to `queue`
             injector.scroll(dx: Int16(bitPattern: dx), dy: Int16(bitPattern: dy), unit: unit)
         case .releaseAll:
             injector.releaseAll()
-        case .status:
+        case .cursorMode:
+            guard let on = r.u8() else { return }
+            onShare { $0.setCursorLocal(on != 0) }
+        case .clipboardMode:
+            guard let on = r.u8() else { return }
+            onShare { $0.setClipboard(on != 0) }
+        case .clipText:
+            let body = opened.1
+            onShare { $0.received(body) }
+        case .status, .cursorShape:
             break // Mac -> viewer only
         }
     }
