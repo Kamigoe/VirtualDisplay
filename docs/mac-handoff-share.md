@@ -68,4 +68,35 @@ Windows 側のセッションから Mac 側のセッションへの引き継ぎ�
 
 ## 結果
 
-（Mac 側のセッションが記入）
+2026-11-16、Mac 側のセッションが記入。
+
+1. `db8514b` を取得。
+2. ビルドは通ったが、警告が 1 件増えていた：`DesktopShare.swift:175` で、`@MainActor` の `DesktopShare.maxText` を
+   main actor ではない `ClipAssembler.push` から参照している（Swift 6 ではエラー）。`maxText` を
+   `nonisolated static let` にして解消し、警告は 0 件になった。通信仕様は変えていない。
+3. `vdsend --input-self-test`：`input self-test passed`。
+4. 引数 `--mode 3440x1440@60 --main` のままインストールした。Windows の `vdview` はすぐに再接続し、
+   `input: … authenticated` → `capture: cursor left out (the viewer draws it)`。アクセシビリティの許可もそのまま。
+   `vdsend` のメインスレッドは `RunLoop.main.run()` で回っているので、カーソルとクリップボードのタイマーは動く。
+5. 利用者の試験（Windows の `vdview`）：
+
+| | 項目 | 結果 |
+|---|---|---|
+| 1 | カーソルが遅れずに付いてくる・二重に見えない | ○ |
+| 2 | カーソルの形（I ビーム・手・リサイズ矢印）、ホットスポット | ○（LaunchAgent でも `NSCursor.currentSystem` で形が取れた） |
+| 3 | 全画面 / ウィンドウ、HiDPI / 等倍での大きさ | ○ |
+| 4 | F8 で OFF → 映像にカーソルが戻る、ON → PC 側の表示に戻る | ○ |
+| 5 | クリップボード双方向（日本語・複数行、メモ帳の改行） | ○ |
+| 6 | 大きいテキスト・1 MiB 超え | ○（下記） |
+
+   6 は Mac 側で試験用のテキスト（日本語入り 4002 行、408,034 バイト）を作って行った：
+   - Mac → Windows：`pbcopy` → メモ帳に貼り付け。先頭・末尾・行数・改行とも正しい。
+   - Windows → Mac：メモ帳で末尾に ` from Windows` を足して全体をコピー → Mac の `pbpaste` は、元のテキストに
+     その 13 バイトを足したものとバイト単位で一致（CR LF は LF に戻り、CR は 0 個）。
+   - 1 MiB 超え（Mac）：2,040,174 バイトを `pbcopy` → `clipboard: 1992 KiB of text is over the 1 MiB limit; not sent to the viewer`。
+     Windows のクリップボードは前のテキストのまま。
+   - 1 MiB 超え（Windows）：メモ帳で約 1.2 MB にしてコピー → Windows のログに
+     `clipboard: 1195 KiB of text is over the 1 MiB limit; not sent to the Mac`（3 回。コピーを繰り返した分と思われる）。
+     Mac のクリップボードは直前の約 400 KB のまま。
+6. Mac のログ：F8 に合わせて `capture: cursor left out (the viewer draws it)` / `capture: cursor drawn into the video` が
+   交互に出る。`cannot change the cursor setting` は 0 件。

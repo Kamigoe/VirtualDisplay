@@ -25,7 +25,7 @@ final class DesktopShare {
     private var seenChange = 0
     private var incoming = ClipAssembler()
 
-    static let maxText = 1 << 20
+    nonisolated static let maxText = 1 << 20 // also read by ClipAssembler (not on the main actor)
     static let chunk = 60_000
     static let maxCursorSide = 120.0
 
