@@ -122,7 +122,7 @@ vdview <MacのIP>[:port] [options]
 | `--windowed` | ウィンドウで起動（F11 で全画面切替、Esc で全画面解除） |
 | `--vsync` | FIFO 表示（ティアリングなし・遅延増） |
 | `--input-secret PATH` | 入力用の共有シークレットの場所（既定：Windows `%APPDATA%vdviewinput-secret`、Ubuntu `~/.config/vdview/input-secret`） |
-| `--map-ctrl` / `--map-alt` / `--map-win ROLE` | PC の Ctrl / Alt / Windows キーを Mac の何にするか：`cmd` / `ctrl` / `alt` / `shift` / `none`（既定 Ctrl→Command、Alt→Option、Win→Control）。`none` にしたキーは Windows に残る（例：`--map-win none` で Windows キーは Windows の操作のまま） |
+| `--map-ctrl` / `--map-alt` / `--map-win ROLE` | PC の Ctrl / Alt / Windows キーを Mac の何にするか：`cmd` / `ctrl` / `alt` / `shift` / `none`（既定 Ctrl→Command、Alt→Option、Win→Control）。`none` にしたキーは Windows に残る（例：`--map-win none` で Windows キーは Windows の操作のまま）。Ubuntu では Win か Alt のどちらかを `none` にすると、GNOME のショートカットはすべて GNOME に残る |
 
 表示中のキー操作。**入力の転送が ON の間は、F8 以外のキーはすべて Mac に送られる**ので、
 下の F1〜F5・F11・Esc・Enter は F8 で転送を OFF にしてから使う（シークレットがなく転送できないときは常に効く）：
@@ -167,7 +167,13 @@ fps / 表示 fps / ビットレート / 遅延（Mac で描画 → PC で表示�
 - Windows では、転送が ON で `vdview` が前面にある間、Windows キー・Alt（Alt+Tab、Alt+F4、Alt+Space など）・Ctrl+Esc も
   Windows ではなく Mac に送る（低レベルのキーボードフックで先に受け取る）。転送が OFF のとき、別のウィンドウが前面のときは
   今までどおり Windows が処理する。Ctrl+Alt+Del と Win+L は横取りできない。
-- まだできないこと：Ubuntu では Super キーなどを GNOME が先に処理する。
+- Ubuntu（Wayland）でも、転送が ON で `vdview` が前面にある間は、Super・Alt+Tab・Alt+F4・Alt+Space・Ctrl+Alt+矢印などの
+  GNOME のショートカットを Mac に送る（keyboard-shortcuts-inhibit で GNOME に止めてもらう）。初回は GNOME が許可を聞くので
+  「許可」を選ぶ（アプリ一覧の「Mac (VirtualDisplay)」から起動すれば、許可が記憶される。`.desktop` の `StartupWMClass=vdview` でウィンドウとランチャーが結び付くため）。
+  転送が OFF のとき、別のウィンドウが前面のときは GNOME が処理する。
+  **Super+Esc** は GNOME の非常口で、押すと `vdview` が前面・転送 ON のままショートカットだけ GNOME に戻る
+  （文字やマウスは Mac に送られ続ける）。もう一度 Mac に送るには F8 を 2 回（OFF → ON）。
+  Ctrl+Alt+F1〜F12（仮想端末の切り替え）は横取りできない。X11 のセッションでは横取りしない。
 
 ### 自己テスト
 

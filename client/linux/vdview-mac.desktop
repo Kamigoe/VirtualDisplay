@@ -6,3 +6,4 @@ Exec=sh -c '"$HOME/.local/bin/vdview-mac"'
 Icon=video-display
 Terminal=false
 Categories=Utility;
+StartupWMClass=vdview

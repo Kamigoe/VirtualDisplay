@@ -16,5 +16,12 @@ wgpu = "30.0.1"
 winit = "0.30.13"
 x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
 
+# Wayland: the keyboard-shortcuts-inhibit protocol (src/wlinhibit.rs). winit already uses these
+# crates; this only names them and turns on the protocol and the foreign-connection support.
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-backend = { version = "0.3.17", features = ["client_system"] }
+wayland-client = "0.31.15"
+wayland-protocols = { version = "0.32.13", features = ["client", "unstable"] }
+
 [build-dependencies]
 cc = "1.5.1"

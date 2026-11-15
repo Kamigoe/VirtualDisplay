@@ -11,7 +11,15 @@
 低レベルのキーボードフックで Win・Alt・（Ctrl を押している間の）Esc を Windows に渡さず、`vdview` から直接 Mac へ送る。
 Windows は Win / Alt が押されたことを知らないので、組み合わせのもう一方のキー（C、Tab、F4 など）は普通のキーとして
 `vdview` に届き、いつもの経路で送られる。押下を横取りしたキーは離すときも横取りし、その逆も同じ（片方だけ届くことはない）。
-`none` に割り当てたキーは横取りしない。Ubuntu の試験は未実施。
+`none` に割り当てたキーは横取りしない。
+
+Ubuntu（24.04、GNOME 46、Wayland）で試験・実装（2026-11-16、経過は `docs/ubuntu-handoff-input.md`）：
+共通コードのキー・IME・修飾キー・マウス・F8 はそのまま動いた。Super・Alt+Tab などは GNOME に取られたので、
+`client/src/wlinhibit.rs` で keyboard-shortcuts-inhibit プロトコルを使い、転送 ON の間だけ GNOME にショートカットを
+止めてもらう（フォーカスがある間だけ効くのは GNOME 側の仕様。キーは普通のキー入力として `vdview` に届き、いつもの経路で
+送られる）。止めるか止めないかの全か無かなので、Win か Alt を `none` にしたときは使わない。
+winit 0.30 はこのプロトコルを公開していないので、winit の `wl_display` / `wl_surface` を `wayland-client` で直接使う
+（クレートは winit が既に使っているものだけ）。
 
 最初の版は利用者の試験で効かなかった（Win・Alt 系が Windows に取られ、Alt+F4 で閉じた）。調べると、フックが一度も
 呼ばれていなかった。原因は **winit がウィンドウ作成時にキーボードの Raw Input を登録すること**で、登録した
@@ -40,7 +48,7 @@ mac-input-cast（Python。Windows → Mac の入力キャスト）を置き換�
 | | 項目 | 決定 |
 |---|---|---|
 | D1 | 転送の切り替え | **F8 で ON / OFF、起動時は ON**。ON の間は F1〜F12 を含むすべてのキーを Mac に送る。`vdview` 自身の操作（F1〜F5、F11、Esc、Enter）は OFF のときだけ効く |
-| D2 | Windows キー・Alt+Tab | **Windows では低レベルのキーボードフックで、転送 ON かつ `vdview` が前面のときだけ横取りする**（フェーズ 2）。Ctrl+Alt+Del は不可（OS の仕様）。Wayland では不可 |
+| D2 | Windows キー・Alt+Tab | **Windows では低レベルのキーボードフックで、転送 ON かつ `vdview` が前面のときだけ横取りする**（フェーズ 2）。Ctrl+Alt+Del は不可（OS の仕様）。**Wayland では keyboard-shortcuts-inhibit で、転送 ON の間だけ GNOME にショートカットを止めてもらう**（2026-11-16）。Ctrl+Alt+F キーは不可 |
 | D3 | 認証 | **共有シークレットによる相互認証**（下記） |
 | D4 | 暗号化 | **入力メッセージを ChaCha20-Poly1305 で暗号化**。PC 側は RustCrypto のクレートを使う（「外部依存を増やさない」方針の例外）。Mac 側は CryptoKit。X25519 の使い捨て鍵交換で前方秘匿性も持たせる |
 | D5 | マウス | **絶対座標のみ** |
@@ -49,7 +57,7 @@ mac-input-cast（Python。Windows → Mac の入力キャスト）を置き換�
 ## フェーズ
 
 1. 通信・認証・暗号化と、キーボード・マウスの基本。Windows で試験。
-2. Windows のキーボードフック（D2）、Ubuntu での試験。
+2. Windows のキーボードフック（D2）、Ubuntu での試験と横取り。→ 2026-11-16 完了。
 3. mac-input-cast を役目終了にする（README で案内）。→ 2026-11-13 完了：mac-input-cast の README の冒頭に、
    後継が VirtualDisplay であること・違いの表・移行の手順（同時に動かさない）を書いた。VirtualDisplay の README にも
    置き換えた旨を書いた。

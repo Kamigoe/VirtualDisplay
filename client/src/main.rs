@@ -12,6 +12,8 @@ mod secure;
 mod stats;
 #[cfg(windows)]
 mod winhook;
+#[cfg(target_os = "linux")]
+mod wlinhibit;
 
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
@@ -336,6 +338,9 @@ struct Running {
     /// Takes the Windows key and Alt from Windows while forwarding (see `winhook`).
     #[cfg(windows)]
     hook: Option<winhook::Hook>,
+    /// Takes the desktop's shortcuts (Super, Alt+Tab) while forwarding on Wayland (see `wlinhibit`).
+    #[cfg(target_os = "linux")]
+    shortcuts: Option<wlinhibit::Shortcuts>,
 
     /// Status panel: shown while pinned (F1), until `osd_until`, or while a switch is pending.
     osd_pinned: bool,
@@ -861,6 +866,13 @@ impl App {
         );
 
         let mut attrs = Window::default_attributes().with_title("vdview");
+        // Wayland app id / X11 class: lets GNOME match the window to a launcher with
+        // StartupWMClass=vdview and remember the permission to take its shortcuts (see wlinhibit).
+        #[cfg(target_os = "linux")]
+        {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            attrs = WindowAttributesExtWayland::with_name(attrs, "vdview", "vdview");
+        }
         if self.args.windowed {
             let (pw, ph) = if hello.width == 0 {
                 (1280, 720)
@@ -898,6 +910,8 @@ impl App {
                 _ => None,
             }
         };
+        #[cfg(target_os = "linux")]
+        let shortcuts = wlinhibit::Shortcuts::new(&window, self.args.modifiers);
         let mut r = Running {
             window,
             renderer,
@@ -926,6 +940,8 @@ impl App {
             input_silence_noted: false,
             #[cfg(windows)]
             hook,
+            #[cfg(target_os = "linux")]
+            shortcuts,
             osd_pinned: false,
             osd_until: Some(Instant::now() + OSD_SHOW),
             switching: false,
@@ -1083,6 +1099,13 @@ impl ApplicationHandler<UserEvent> for App {
                 None
             });
         }
+        #[cfg(target_os = "linux")]
+        {
+            let forwarding = r.forwarding();
+            if let Some(s) = &mut r.shortcuts {
+                s.update(forwarding);
+            }
+        }
         if r.forwarding() {
             r.flush_pointer(); // at most one pointer message per turn of the event loop
         }
@@ -1127,6 +1150,10 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(r) = self.running.as_mut() {
             r.generation.fetch_add(1, Ordering::SeqCst); // stop any connector
             r.end_session();
+            #[cfg(target_os = "linux")]
+            {
+                r.shortcuts = None; // while winit's Wayland connection is still open
+            }
         }
     }
 }
