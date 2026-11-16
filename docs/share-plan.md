@@ -8,7 +8,8 @@ Windows ではビルド・単体テスト・実際のクリップボードを使
 Mac でビルド（警告 1 件を修正）・インストールのあと、利用者の試験ですべて ○：カーソルが遅れずに付いてくる、形
 （I ビーム・手・リサイズ矢印）とホットスポット、全画面 / ウィンドウ・HiDPI / 等倍での大きさ、F8 での切り替え、
 クリップボードの双方向（日本語・複数行・約 400 KB）と 1 MiB の上限。LaunchAgent で動く `vdsend` でも
-`NSCursor.currentSystem` で形が取れた。Ubuntu（フェーズ 2）は未着手。
+`NSCursor.currentSystem` で形が取れた。Ubuntu（フェーズ 2）は Mac 側のセッションに引き継ぎ
+（`docs/ubuntu-handoff-share.md`）。
 
 ## 目的
 

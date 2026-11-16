@@ -125,5 +125,6 @@
    試験し、Super・Alt+Tab などの横取り（keyboard-shortcuts-inhibit）も実装して完了。X11 のセッションは未対応・未試験。
    詳細は `docs/input-plan.md`
 3. ローカルでのカーソル描画、テキストのクリップボード共有。2026-11-16 設計・実装し、Windows と Mac で動作を確認。
-   Ubuntu（カーソルの試験とクリップボードの実装）が残り。詳細は `docs/share-plan.md`
+   Ubuntu（カーソルの試験とクリップボードの実装）が残り（手順は `docs/ubuntu-handoff-share.md`）。
+   詳細は `docs/share-plan.md`
 4. D&D・画面端でのカーソル移動
