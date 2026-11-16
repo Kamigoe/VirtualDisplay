@@ -3,9 +3,12 @@
 `docs/roadmap.md` の 3.「ローカルでのカーソル描画、テキストのクリップボード共有」の設計。2026-11-16 確定。
 通信仕様は `docs/protocol.md` の「カーソルとクリップボード」。
 
-**状況**：Windows 側（`vdview`）と Mac 側（`vdsend`）を実装（2026-11-16）。Windows ではビルド・単体テスト・
-実際のクリップボードを使う試験（`cargo test --release -- --ignored clipboard`）が通った。
-**Mac 側はまだビルドしていない**（手順は `docs/mac-handoff-share.md`）。Ubuntu のクリップボードは未実装。
+**状況**：フェーズ 1（Windows と Mac）は実装・試験済み（2026-11-16、`db8514b`。経過は `docs/mac-handoff-share.md`）。
+Windows ではビルド・単体テスト・実際のクリップボードを使う試験（`cargo test --release -- --ignored clipboard`）が通り、
+Mac でビルド（警告 1 件を修正）・インストールのあと、利用者の試験ですべて ○：カーソルが遅れずに付いてくる、形
+（I ビーム・手・リサイズ矢印）とホットスポット、全画面 / ウィンドウ・HiDPI / 等倍での大きさ、F8 での切り替え、
+クリップボードの双方向（日本語・複数行・約 400 KB）と 1 MiB の上限。LaunchAgent で動く `vdsend` でも
+`NSCursor.currentSystem` で形が取れた。Ubuntu（フェーズ 2）は未着手。
 
 ## 目的
 
