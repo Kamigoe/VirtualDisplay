@@ -2031,6 +2031,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hkdf",
  "hmac",
+ "libc",
  "pollster",
  "sha2",
  "socket2",

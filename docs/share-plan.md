@@ -8,8 +8,10 @@ Windows ではビルド・単体テスト・実際のクリップボードを使
 Mac でビルド（警告 1 件を修正）・インストールのあと、利用者の試験ですべて ○：カーソルが遅れずに付いてくる、形
 （I ビーム・手・リサイズ矢印）とホットスポット、全画面 / ウィンドウ・HiDPI / 等倍での大きさ、F8 での切り替え、
 クリップボードの双方向（日本語・複数行・約 400 KB）と 1 MiB の上限。LaunchAgent で動く `vdsend` でも
-`NSCursor.currentSystem` で形が取れた。Ubuntu（フェーズ 2）は Mac 側のセッションに引き継ぎ
-（`docs/ubuntu-handoff-share.md`）。
+`NSCursor.currentSystem` で形が取れた。Ubuntu（フェーズ 2）は 2026-11-20 に実装・試験済み（経過は `docs/ubuntu-handoff-share.md`）：
+カーソルは共通コードのまま動いた。クリップボードは `client/src/clipwl.rs`（winit の Wayland 接続の上で
+`wl_data_device` を使う。フォーカスを得たとき・フォーカス中の変化で読み、Mac からの分はフォーカス中に設定する）。
+利用者の試験で双方向（日本語・複数行・約 400 KB）、1 MiB の上限、送り返しのないことを確認した。
 
 ## 目的
 
@@ -58,3 +60,5 @@ Mac でビルド（警告 1 件を修正）・インストールのあと、利�
 2. Ubuntu：カーソルの試験（共通コード）とクリップボードの実装。Wayland は、フォーカスがあるときしか
    クリップボードを読み書きできない（GNOME はデータコントロール系のプロトコルを持たない）ので、
    winit が既に使っているクレート（`smithay-client-toolkit`）の上に乗る `smithay-clipboard` などを検討する。
+   → 2026-11-20 完了。`smithay-clipboard` は変化を知らせない（読みに行く方式）ので使わず、`wlinhibit.rs` と同じく
+   `wayland-client` で `wl_data_device` を直接使った。

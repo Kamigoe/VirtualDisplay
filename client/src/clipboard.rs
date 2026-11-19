@@ -4,18 +4,23 @@
 //! at most `CHUNK` bytes each, in order. Line ends are LF on the wire. Up to `MAX_TEXT` bytes;
 //! longer text is not sent. Nothing is sent on connecting, only later copies; text the other side
 //! marked as secret (password managers) is not sent at all. The OS side lives in `clipwin`
-//! (Windows); elsewhere there is no clipboard yet.
+//! (Windows) and `clipwl` (Linux, Wayland); elsewhere there is no clipboard yet.
 
 #[cfg(windows)]
 pub use crate::clipwin::Clipboard;
+#[cfg(target_os = "linux")]
+pub use crate::clipwl::Clipboard;
 
 /// No clipboard on this platform yet.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub struct Clipboard;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 impl Clipboard {
-    pub fn start(_on_copy: impl Fn(String) + Send + 'static) -> Option<Clipboard> {
+    pub fn start(
+        _window: &winit::window::Window,
+        _on_copy: impl Fn(String) + Send + 'static,
+    ) -> Option<Clipboard> {
         None
     }
     pub fn set(&self, _text: String) {}

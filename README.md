@@ -187,7 +187,11 @@ fps / 表示 fps / ビットレート / 遅延（Mac で描画 → PC で表示�
   接続した時点の中身は送らず、その後にコピーしたものだけを送る。パスワード管理ソフトが「共有しない」印を付けた内容
   （Windows の `ExcludeClipboardContentFromMonitorProcessing`、Mac の `org.nspasteboard.ConcealedType` など）は送らない。
   画像やファイルは対象外。使わないときは `vdview --no-clipboard`。
-- Ubuntu：クリップボードはまだ未対応。カーソルは Windows と共通のコードだが、まだ試していない。
+- Ubuntu（Wayland）：カーソルは Windows と同じ。クリップボードは、GNOME がフォーカスのあるアプリにしか読み書きさせない
+  ため、**Ubuntu でコピーしたテキストは `vdview` を前面にした時点で Mac に送られる**（Mac で貼り付けるときは前面に
+  しているはずなので、手順は変わらない）。`vdview` が前面でないときに Mac でコピーしたテキストは、次に `vdview` を
+  前面にしたときに Ubuntu のクリップボードに入る。パスワード管理ソフトの `x-kde-passwordManagerHint` が付いた内容は送らない。
+  X11 のセッションでは共有しない。
 
 ### 自己テスト
 

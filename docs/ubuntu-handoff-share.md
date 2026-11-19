@@ -88,4 +88,60 @@ Wayland での注意点と方針：
 
 ## 結果
 
-（Mac 側のセッションが記入）
+2026-11-16〜20、Mac 側のセッションが記入。
+
+### A. 準備
+
+1. `ffc2dfb` を取得。ビルド成功（Linux では `clipboard::to_wire` が未使用という警告 1 件。C で使うようになり解消）、テスト 14 件成功。
+2. `apt-mark showhold` → `linux-firmware-amd-graphics` は固定のまま。候補はまだ 0ubuntu3.4（直った版は出ていない）ので固定を続ける。
+
+### B. カーソル（利用者が実施）
+
+1〜4 とも ○（共通コードのまま。変更なし）。
+
+### C. クリップボードの実装
+
+`client/src/clipwl.rs`（Linux 専用）を追加した。**`smithay-clipboard` は使わず**、`wlinhibit.rs` と同じく winit の
+`wl_display` を `wayland-client` で使い、自分のイベントキューで `wl_data_device_manager` / `wl_data_device` を直接使った。
+理由：`smithay-clipboard` は変化を知らせない（`load` で読みに行く方式）ので、コピーされたことを知るには定期的に読むしかなく、
+しかも Wayland ではフォーカスがないと読めない。`wl_data_device` なら、選択の通知（`selection`）がそのまま「コピーされた」合図になる。
+
+- 選択の通知はフォーカスを得たときと、フォーカス中の変化で届く。届いたテキストを別スレッドでパイプから読み、`on_copy` に渡す。
+  - 送らないもの：起動後最初の通知（起動時の中身）、自分の選択（`wl_data_source` が生きている間。他がコピーすると先に
+    `cancelled` が届く）、**同じ中身の再通知**（フォーカスのたびに届くので、PC のクリップボードの中身のハッシュと比べる。
+    Mac からのテキストを設定したときもハッシュを更新するので、送り返さない）、`x-kde-passwordManagerHint` 付きの内容。
+  - MIME 型は `text/plain;charset=utf-8` → `UTF8_STRING` → `text/plain` の順で選び、書くときは 3 つとも提供する。
+- Mac からのテキストは、フォーカスがあれば次のイベントループの周回で `set_selection`（自分の `wl_keyboard` / `wl_pointer` から
+  得た最新の serial）。なければ保留し、フォーカスを得たときに設定する。
+- `Clipboard::start` に `&Window` を足した（`clipwin.rs` は受け取って無視）。`update()` をイベントループの周回ごとに呼び、
+  終了時は `exiting` で winit が接続を閉じる前に破棄する。X11 では `None`。
+- 依存：`libc`（`fcntl` のため。winit が既に使っている）を Linux 用に名前だけ足した。Cargo.lock の変化は 1 行。
+- `vdview` のログに `clipboard: N bytes to the Mac` / `from the Mac` を出すようにした（中身は出さない。Windows も同じ）。
+  `VDVIEW_CLIPBOARD_DEBUG=1` で、フォーカス・通知・書き込みの詳細（大きさと型のみ）も出る。
+
+**見つかった落とし穴**：最初の版は、小さいテキストは動いたが、Mac からの約 400 KB を Ubuntu で貼り付けられなかった。
+デバッグログで `send` の書き込みが `WouldBlock`（EAGAIN）で止まっていた。GNOME が渡すパイプはノンブロッキングなので、
+パイプのバッファ（64 KiB）を超えると失敗する。書く前に `O_NONBLOCK` を外すように直した。
+
+Windows のビルド：この Mac で、C の部分を外した作業用のコピーを `cargo check --target x86_64-pc-windows-msvc` し、
+警告なしで通ることを確認した（実機でのビルドは未確認）。
+
+### D. クリップボードの試験（利用者が実施。テキストは Mac 側で用意して比較）
+
+| | 項目 | 結果 |
+|---|---|---|
+| 1 | Mac でコピー → Ubuntu のエディタに貼り付け（日本語・複数行） | ○ |
+| 2 | Ubuntu でコピー → `vdview` を前面に → Mac で貼り付け | ○（`58 bytes from the Mac` → 追記して `70 bytes to the Mac`、中身も一致） |
+| 3 | 大きいテキスト・1 MiB 超え | ○（下記） |
+| 4 | 送り返しがない | ○（Mac からのテキストのあと、同じ大きさの `to the Mac` がない） |
+| 5 | `vdview` が前面でないときに Mac でコピー → 前面にしてから貼り付け | ○ |
+| 6 | パスワード管理ソフト | 未実施（手元にない） |
+
+3 の詳細：
+- Mac → Ubuntu：408,034 バイト（4002 行、日本語入り）。修正前は貼り付けられず（上の落とし穴）、修正後は貼り付けられた。
+- Ubuntu → Mac：先頭が `ROUND-2` の 408,042 バイトを Ubuntu で貼り付け、先頭に `X` と改行を足してコピー → Mac の `pbpaste` は
+  そのとおりの 408,044 バイトとバイト単位で一致（CR は 0 個）。
+- 1 MiB 超え：Ubuntu → Mac は `clipboard: 1195 KiB of text is over the 1 MiB limit; not sent to the Mac`、
+  Mac → Ubuntu は Mac のログに `clipboard: 1992 KiB of text is over the 1 MiB limit; not sent to the viewer`。
+
+README（「カーソルとクリップボード」の Ubuntu の行）、`docs/share-plan.md` の状況とフェーズ 2、`docs/roadmap.md` の 3. を更新した。

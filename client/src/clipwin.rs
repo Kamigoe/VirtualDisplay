@@ -115,7 +115,11 @@ pub struct Clipboard {
 
 impl Clipboard {
     /// `on_copy` runs on the clipboard thread with text copied on this PC (LF line ends).
-    pub fn start(on_copy: impl Fn(String) + Send + 'static) -> Option<Clipboard> {
+    /// The window is not needed on Windows (Linux needs its Wayland connection).
+    pub fn start(
+        _window: &winit::window::Window,
+        on_copy: impl Fn(String) + Send + 'static,
+    ) -> Option<Clipboard> {
         let inbox = Arc::new(Mutex::new(None::<String>));
         let thread_inbox = inbox.clone();
         let (tx, rx) = std::sync::mpsc::channel();

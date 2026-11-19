@@ -3,6 +3,8 @@
 mod clipboard;
 #[cfg(windows)]
 mod clipwin;
+#[cfg(target_os = "linux")]
+mod clipwl;
 mod clock;
 mod control;
 mod cursor;
@@ -535,10 +537,8 @@ impl Running {
         let state = match (&self.mac_cursor, self.cursor_local, &self.start) {
             (Some((n, shape)), true, Some(s)) => {
                 let size = self.window.inner_size();
-                let scale = cursor::video_scale(
-                    (size.width, size.height),
-                    (s.pixel_width, s.pixel_height),
-                );
+                let scale =
+                    cursor::video_scale((size.width, size.height), (s.pixel_width, s.pixel_height));
                 CursorState::Mac {
                     shape: *n,
                     hidden: shape.hidden(),
@@ -589,6 +589,7 @@ impl Running {
             );
             return;
         }
+        println!("clipboard: {} bytes to the Mac", text.len());
         let _ = thread::Builder::new()
             .name("clipboard-send".into())
             .spawn(move || c.send_clipboard(&text));
@@ -1022,7 +1023,7 @@ impl App {
         let (renderer, uploader) = Renderer::new(window.clone(), self.args.vsync)?;
         let clipboard = if self.args.clipboard {
             let proxy = self.proxy.clone();
-            clipboard::Clipboard::start(move |text| {
+            clipboard::Clipboard::start(&window, move |text| {
                 let _ = proxy.send_event(UserEvent::Copied(text));
             })
         } else {
@@ -1227,6 +1228,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::Mac(g, MacEvent::Clipboard(text)) if g == current => {
                 if let Some(c) = &r.clipboard {
+                    println!("clipboard: {} bytes from the Mac", text.len());
                     c.set(text);
                 }
             }
@@ -1252,6 +1254,9 @@ impl ApplicationHandler<UserEvent> for App {
             let forwarding = r.forwarding();
             if let Some(s) = &mut r.shortcuts {
                 s.update(forwarding);
+            }
+            if let Some(c) = &mut r.clipboard {
+                c.update();
             }
         }
         r.sync_mac_modes();
@@ -1302,7 +1307,9 @@ impl ApplicationHandler<UserEvent> for App {
             r.end_session();
             #[cfg(target_os = "linux")]
             {
-                r.shortcuts = None; // while winit's Wayland connection is still open
+                // While winit's Wayland connection is still open.
+                r.shortcuts = None;
+                r.clipboard = None;
             }
         }
     }
