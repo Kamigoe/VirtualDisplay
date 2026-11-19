@@ -9,6 +9,7 @@ mod clock;
 mod control;
 mod cursor;
 mod decoder;
+mod display;
 mod input;
 mod osd;
 mod protocol;
@@ -48,7 +49,8 @@ use crate::stats::Stats;
 
 const USAGE: &str = "\
 usage: vdview <mac-host>[:port] [options]
-  --mode WxH@HZ         request this logical mode (default: match this PC's primary monitor)
+  --mode WxH@HZ         request this logical mode (default: the one chosen with F6 for the
+                        monitor, else match the monitor)
   --hidpi / --no-hidpi  2x backing store on the Mac (default: on when the monitor scale is >= 175%)
   --server-mode         keep whatever mode the Mac is already using
   --chroma 420|444      chroma subsampling (default 444: sharp small text/UI, 8-bit only, decoded
@@ -59,7 +61,9 @@ usage: vdview <mac-host>[:port] [options]
   --bitrate MBPS        average bitrate (default: sender's)
   --hwaccel NAME        auto | none | d3d11va | vaapi | vulkan | videotoolbox (default auto)
   --threads N           software decoding threads (default 0 = auto)
-  --monitor N           show on monitor N (see the list printed at startup; default: primary)
+  --monitor N           show on monitor N (see the list printed at startup; default: the one
+                        chosen last, else the primary). With several monitors and neither
+                        --monitor nor --mode / --hidpi / --server-mode, vdview asks at startup
   --windowed            start in a window instead of borderless fullscreen (F11 toggles)
   --vsync               present with FIFO (no tearing, +latency) instead of mailbox/immediate
 
@@ -81,6 +85,7 @@ keys while running:
       While on, the Mac's cursor is drawn as this PC's own cursor (no video delay).
   F2  8-bit <-> 10-bit      F3  4:2:0 <-> 4:4:4      F4  cycle refresh rate (max / 120 / 60 Hz)
   F5  HiDPI (2x) <-> 1x     F11 fullscreen on/off     Esc leave fullscreen
+  F6  choose the monitor and the Mac's resolution (remembered for the next start)
 
 self-test (no sender or display needed):
   vdview --snapshot IN.hevc OUT.ppm [--hwaccel NAME]
@@ -222,9 +227,15 @@ impl Args {
             .ok_or_else(|| anyhow!("no address for {with_port}"))
     }
 
-    /// Mode request: explicit `--mode`, else mirror the local monitor (clamped to the encoder's capacity).
-    /// Returns the request plus the highest refresh rate (mHz) F4 may switch to.
-    fn hello(&self, monitor: Option<&MonitorHandle>) -> (Hello, u32) {
+    /// The display choice (saved, and the startup menu) applies unless the mode is given here.
+    fn uses_display_choice(&self) -> bool {
+        self.mode.is_none() && self.hidpi.is_none() && !self.server_mode
+    }
+
+    /// Mode request: explicit `--mode`, else `chosen` (F6 / saved), else mirror the local monitor
+    /// (clamped to the encoder's capacity). Returns the request plus the highest refresh rate
+    /// (mHz) F4 may switch to.
+    fn hello(&self, monitor: Option<&MonitorHandle>, chosen: Option<display::Res>) -> (Hello, u32) {
         let mut h = Hello {
             width: 0,
             height: 0,
@@ -253,25 +264,62 @@ impl Args {
             return (h, hz);
         }
         let div = if h.hidpi { 2 } else { 1 };
-        h.width = (pw / div) as u16;
-        h.height = (ph / div) as u16;
-        let pixels = (pw * ph) as f64;
-        let max = [mhz, 120_000, 100_000, 60_000]
-            .into_iter()
-            .find(|&r| {
-                r <= mhz && r <= MAX_REFRESH_MHZ && pixels * r as f64 / 1000.0 <= ENCODER_PIXEL_RATE
-            })
-            .unwrap_or(60_000);
-        if max != mhz {
-            println!(
-                "note: monitor runs at {:.0} Hz; requesting at most {:.0} Hz for {pw}x{ph} \
-                 (Mac capture/encoder limits)",
-                mhz as f64 / 1000.0,
-                max as f64 / 1000.0
-            );
-        }
-        h.refresh_mhz = self.refresh.map_or(max, |r| r.min(max));
+        let res = chosen.unwrap_or(display::Res {
+            width: (pw / div) as u16,
+            height: (ph / div) as u16,
+            hidpi: h.hidpi,
+        });
+        (h.width, h.height, h.hidpi) = (res.width, res.height, res.hidpi);
+        let max;
+        (h.refresh_mhz, max) = refresh_for(mhz, &res, self.refresh);
         (h, max)
+    }
+}
+
+/// Refresh rate to request for `res` on a monitor running at `monitor_mhz`, given `--refresh`,
+/// and the highest one F4 may switch to (the monitor's, at most 120 Hz and what the encoder
+/// sustains for the backing pixels).
+fn refresh_for(monitor_mhz: u32, res: &display::Res, wanted: Option<u32>) -> (u32, u32) {
+    let pixels = res.backing_pixels();
+    let max = [monitor_mhz, 120_000, 100_000, 60_000]
+        .into_iter()
+        .find(|&r| {
+            r <= monitor_mhz
+                && r <= MAX_REFRESH_MHZ
+                && pixels * r as f64 / 1000.0 <= ENCODER_PIXEL_RATE
+        })
+        .unwrap_or(60_000);
+    if max != monitor_mhz {
+        let k = if res.hidpi { 2 } else { 1 };
+        println!(
+            "note: monitor runs at {:.0} Hz; requesting at most {:.0} Hz for {}x{} \
+             (Mac capture/encoder limits)",
+            monitor_mhz as f64 / 1000.0,
+            max as f64 / 1000.0,
+            res.width as u32 * k,
+            res.height as u32 * k
+        );
+    }
+    (wanted.map_or(max, |r| r.min(max)), max)
+}
+
+/// Refresh rates F4 cycles through (highest first).
+fn refresh_choices(max: u32, current: u32) -> Vec<u32> {
+    let mut c = vec![max, 120_000, 60_000, current];
+    c.retain(|&r| r <= max);
+    c.sort_unstable_by(|a, b| b.cmp(a));
+    c.dedup();
+    c
+}
+
+/// A monitor as the display menu lists it.
+fn monitor_info(m: &MonitorHandle) -> display::Monitor {
+    display::Monitor {
+        name: m.name().unwrap_or_default(),
+        width: m.size().width,
+        height: m.size().height,
+        refresh_mhz: m.refresh_rate_millihertz().unwrap_or(60_000),
+        scale: m.scale_factor(),
     }
 }
 
@@ -336,6 +384,13 @@ struct Running {
     hello: Hello,
     /// Refresh rates F4 cycles through (mHz, highest first).
     refresh_choices: Vec<u32>,
+    /// `--refresh`, kept for a mode chosen with F6.
+    refresh_wanted: Option<u32>,
+    /// The display menu (at startup with several monitors, and F6), with the monitors it lists.
+    picker: Option<(display::Picker, Vec<MonitorHandle>)>,
+    /// The connection waits for the startup menu.
+    connect_after_picker: bool,
+    saved_display: display::Saved,
 
     /// Connection generation: events from older connections are ignored.
     generation: Arc<AtomicU64>,
@@ -665,6 +720,95 @@ impl Running {
         self.flash_osd();
     }
 
+    /// The mode currently asked for (None with --server-mode).
+    fn current_res(&self) -> Option<display::Res> {
+        (self.hello.width != 0).then_some(display::Res {
+            width: self.hello.width,
+            height: self.hello.height,
+            hidpi: self.hello.hidpi,
+        })
+    }
+
+    /// F6 (and at startup): the monitor and resolution menu in the status panel. `on`: the
+    /// monitor to highlight (default: the window's; Wayland may not know it before the window
+    /// is shown).
+    fn open_picker(&mut self, at_start: bool, on: Option<MonitorHandle>) {
+        let monitors: Vec<MonitorHandle> = self.window.available_monitors().collect();
+        if monitors.is_empty() {
+            println!("the system lists no monitors; nothing to choose");
+            return;
+        }
+        let current = on.or_else(|| self.window.current_monitor());
+        let index = current
+            .and_then(|c| monitors.iter().position(|m| *m == c))
+            .unwrap_or(0);
+        let infos = monitors.iter().map(monitor_info).collect();
+        let picker = display::Picker::new(infos, index, self.current_res(), at_start);
+        self.picker = Some((picker, monitors));
+        self.update_osd();
+    }
+
+    /// A key while the display menu is open (it takes every key).
+    fn picker_key(&mut self, key: &Key) {
+        let current = self
+            .window
+            .current_monitor()
+            .map(|m| m.name().unwrap_or_default());
+        let current_res = self.current_res();
+        let saved = &self.saved_display;
+        let Some((picker, monitors)) = self.picker.as_mut() else {
+            return;
+        };
+        let picked = picker.key(key, |m| {
+            if current.as_deref() == Some(m.name.as_str()) && current_res.is_some() {
+                current_res
+            } else {
+                saved.mode(&m.name)
+            }
+        });
+        match picked {
+            display::Picked::Open => {}
+            display::Picked::Cancelled => self.picker = None,
+            display::Picked::Chosen(i, res) => {
+                let monitor = monitors[i].clone();
+                self.picker = None;
+                self.choose_display(&monitor, res);
+            }
+        }
+        self.update_osd();
+    }
+
+    /// Shows vdview on `monitor`, asks the Mac for `res` and remembers both.
+    fn choose_display(&mut self, monitor: &MonitorHandle, res: display::Res) {
+        let name = monitor.name().unwrap_or_default();
+        let moved = self.window.current_monitor().as_ref() != Some(monitor);
+        if moved {
+            if self.window.fullscreen().is_some() {
+                self.window
+                    .set_fullscreen(Some(Fullscreen::Borderless(Some(monitor.clone()))));
+            } else {
+                // Not on Wayland, which does not let windows place themselves.
+                self.window.set_outer_position(monitor.position());
+            }
+        }
+        self.saved_display.remember(&name, res);
+        let unchanged = self.current_res() == Some(res)
+            && self.refresh_choices.contains(&self.hello.refresh_mhz);
+        let mhz = monitor.refresh_rate_millihertz().unwrap_or(60_000);
+        let (refresh, max) = refresh_for(mhz, &res, self.refresh_wanted);
+        (self.hello.width, self.hello.height, self.hello.hidpi) =
+            (res.width, res.height, res.hidpi);
+        self.hello.refresh_mhz = refresh;
+        self.refresh_choices = refresh_choices(max, refresh);
+        println!("display: {name}, {}", res.label().to_lowercase());
+        if std::mem::take(&mut self.connect_after_picker) {
+            self.connect();
+            self.flash_osd();
+        } else if !(unchanged && !moved) {
+            self.reconfigure("display");
+        }
+    }
+
     fn flash_osd(&mut self) {
         self.osd_until = Some(Instant::now() + OSD_SHOW);
         self.update_osd();
@@ -680,10 +824,10 @@ impl Running {
     /// Re-renders (or hides) the status panel and redraws so it shows even on a static screen.
     fn update_osd(&mut self) {
         let keys = if self.forwarding() {
-            "F8 INPUT OFF (THEN F1-F5 AND F11 CONTROL VDVIEW)".to_string()
+            "F8 INPUT OFF (THEN F1-F6 AND F11 CONTROL VDVIEW)".to_string()
         } else {
             format!(
-                "F1 {}  F2 BIT DEPTH  F3 CHROMA  F4 REFRESH  F5 HIDPI  F8 INPUT  F11 FULLSCREEN",
+                "F1 {}  F2 BIT DEPTH  F3 CHROMA  F4 REFRESH  F5 HIDPI  F6 DISPLAY  F8 INPUT  F11 FULLSCREEN",
                 if self.osd_pinned { "HIDE" } else { "PIN" }
             )
         };
@@ -691,7 +835,9 @@ impl Running {
             .chars()
             .take(90)
             .collect::<String>();
-        let lines = if !self.osd_visible() {
+        let lines = if let Some((p, _)) = &self.picker {
+            p.lines()
+        } else if !self.osd_visible() {
             vec![]
         } else if let Some(by) = &self.replaced_by {
             vec![
@@ -789,6 +935,7 @@ impl Running {
                 println!("reconnecting (taking the sender back)");
                 r.connect();
             }
+            Key::Named(NamedKey::F6) => r.open_picker(false, None),
             Key::Named(NamedKey::F1) => {
                 r.osd_pinned = !r.osd_pinned;
                 r.osd_until = None;
@@ -950,6 +1097,8 @@ impl App {
                 m.scale_factor()
             );
         }
+        let saved_display = display::Saved::load();
+        let by_name = |name: &str| monitors.iter().find(|m| m.name().as_deref() == Some(name));
         let monitor = match self.args.monitor {
             Some(i) => Some(
                 monitors
@@ -957,9 +1106,23 @@ impl App {
                     .cloned()
                     .ok_or_else(|| anyhow!("no monitor {i}"))?,
             ),
-            None => el.primary_monitor().or_else(|| monitors.first().cloned()),
+            None => saved_display
+                .last
+                .as_deref()
+                .and_then(by_name)
+                .cloned()
+                .or_else(|| el.primary_monitor())
+                .or_else(|| monitors.first().cloned()),
         };
-        let (hello, max_refresh) = self.args.hello(monitor.as_ref());
+        let chosen = monitor
+            .as_ref()
+            .filter(|_| self.args.uses_display_choice())
+            .and_then(|m| saved_display.mode(&m.name().unwrap_or_default()))
+            .filter(display::fits_encoder);
+        // With several monitors, ask which one (and which resolution) before connecting.
+        let ask =
+            monitors.len() >= 2 && self.args.monitor.is_none() && self.args.uses_display_choice();
+        let (hello, max_refresh) = self.args.hello(monitor.as_ref(), chosen);
         let addr = self.args.server_addr()?;
         let secret = match self
             .args
@@ -1030,10 +1193,7 @@ impl App {
             None
         };
 
-        let mut refresh_choices = vec![max_refresh, 120_000, 60_000, hello.refresh_mhz];
-        refresh_choices.retain(|&r| r <= max_refresh);
-        refresh_choices.sort_unstable_by(|a, b| b.cmp(a));
-        refresh_choices.dedup();
+        let refresh_choices = refresh_choices(max_refresh, hello.refresh_mhz);
         #[cfg(windows)]
         let hook = {
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -1058,6 +1218,10 @@ impl App {
             next_stats: Instant::now() + STATS_EVERY,
             hello,
             refresh_choices,
+            refresh_wanted: self.args.refresh,
+            picker: None,
+            connect_after_picker: ask,
+            saved_display,
             generation: Arc::new(AtomicU64::new(0)),
             control: None,
             start: None,
@@ -1086,7 +1250,11 @@ impl App {
             switching: false,
             summary: Default::default(),
         };
-        r.connect();
+        if ask {
+            r.open_picker(true, monitor);
+        } else {
+            r.connect();
+        }
         Ok(r)
     }
 }
@@ -1149,6 +1317,12 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Focused(false) => r.release_all(),
             WindowEvent::KeyboardInput { event, .. } => {
+                if r.picker.is_some() {
+                    if event.state == ElementState::Pressed {
+                        r.picker_key(&event.logical_key);
+                    }
+                    return;
+                }
                 if event.physical_key == PhysicalKey::Code(KeyCode::F8) {
                     if event.state == ElementState::Pressed && !event.repeat {
                         r.toggle_input();
