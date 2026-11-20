@@ -231,7 +231,8 @@ impl Monitor {
     fn label(&self) -> String {
         format!(
             "{}  {}X{} @ {:.0}HZ  SCALE {:.0}%",
-            self.name.to_uppercase(),
+            // Windows names monitors \\.\DISPLAY1 ...; the status panel's font has no backslash.
+            self.name.trim_start_matches(r"\\.\").to_uppercase(),
             self.width,
             self.height,
             self.refresh_mhz as f64 / 1000.0,
@@ -493,6 +494,18 @@ mod tests {
             scale,
         };
         vec![m("DP-3", 3440, 1440, 1.0), m("HDMI-1", 3840, 2160, 2.0)]
+    }
+
+    #[test]
+    fn windows_monitor_names_fit_the_font() {
+        let m = Monitor {
+            name: r"\\.\DISPLAY1".into(),
+            width: 3440,
+            height: 1440,
+            refresh_mhz: 165_000,
+            scale: 1.0,
+        };
+        assert!(m.label().starts_with("DISPLAY1  3440X1440"));
     }
 
     #[test]

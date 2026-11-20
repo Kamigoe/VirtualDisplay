@@ -120,6 +120,10 @@ impl Clipboard {
         _window: &winit::window::Window,
         on_copy: impl Fn(String) + Send + 'static,
     ) -> Option<Clipboard> {
+        Self::spawn(on_copy)
+    }
+
+    fn spawn(on_copy: impl Fn(String) + Send + 'static) -> Option<Clipboard> {
         let inbox = Arc::new(Mutex::new(None::<String>));
         let thread_inbox = inbox.clone();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -358,7 +362,7 @@ mod tests {
     #[ignore]
     fn clipboard_round_trip() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let c = Clipboard::start(move |t| {
+        let c = Clipboard::spawn(move |t| {
             let _ = tx.send(t);
         })
         .unwrap();

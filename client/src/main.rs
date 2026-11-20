@@ -62,8 +62,9 @@ usage: vdview <mac-host>[:port] [options]
   --hwaccel NAME        auto | none | d3d11va | vaapi | vulkan | videotoolbox (default auto)
   --threads N           software decoding threads (default 0 = auto)
   --monitor N           show on monitor N (see the list printed at startup; default: the one
-                        chosen last, else the primary). With several monitors and neither
-                        --monitor nor --mode / --hidpi / --server-mode, vdview asks at startup
+                        chosen last, else the primary). With several monitors, nothing chosen
+                        yet and neither --monitor nor --mode / --hidpi / --server-mode, vdview
+                        asks at startup (later starts use the choice; F6 changes it)
   --windowed            start in a window instead of borderless fullscreen (F11 toggles)
   --vsync               present with FIFO (no tearing, +latency) instead of mailbox/immediate
 
@@ -1119,9 +1120,13 @@ impl App {
             .filter(|_| self.args.uses_display_choice())
             .and_then(|m| saved_display.mode(&m.name().unwrap_or_default()))
             .filter(display::fits_encoder);
-        // With several monitors, ask which one (and which resolution) before connecting.
-        let ask =
-            monitors.len() >= 2 && self.args.monitor.is_none() && self.args.uses_display_choice();
+        // With several monitors and no saved choice (or the saved monitor is gone), ask which one
+        // (and which resolution) before connecting. Later starts use the saved one; F6 changes it.
+        let remembered = saved_display.last.as_deref().and_then(by_name).is_some();
+        let ask = monitors.len() >= 2
+            && !remembered
+            && self.args.monitor.is_none()
+            && self.args.uses_display_choice();
         let (hello, max_refresh) = self.args.hello(monitor.as_ref(), chosen);
         let addr = self.args.server_addr()?;
         let secret = match self
